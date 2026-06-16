@@ -1101,16 +1101,23 @@ class Server:
         loop = asyncio.get_running_loop()
         stop = loop.create_future()
 
+        def handle_signal():
+            if not stop.done():
+                stop.set_result(None)
+
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop.set_result, None)
+            loop.add_signal_handler(sig, handle_signal)
 
         try:
             await stop
         finally:
             for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.remove_signal_handler(sig)
+                loop.add_signal_handler(sig, lambda: None)
 
             await asyncio.gather(*[handler.drain(self.config.shutdown_timeout) for handler in handlers], return_exceptions=True)
 
             for handler in handlers:
                 await handler.stop()
+
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
