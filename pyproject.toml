@@ -1,0 +1,30 @@
+[build-system]
+requires = ["uv_build>=0.9.5,<0.10.0"]
+build-backend = "uv_build"
+
+[project]
+name = "nercone-kaede"
+version = "0.1.0"
+description = "Python Library for Processing HTTP Request/Response Simply and Easily"
+readme = { file = "README.md", content-type = "text/markdown" }
+authors = [ { name = "Nercone", email = "nercone@nercone.dev" } ]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "h2",
+    "aioquic",
+    "uvloop",
+    "async-lru",
+    "minify-html",
+    "rcssmin",
+    "rjsmin",
+    "scour",
+    "zstandard",
+    "brotlicffi"
+]
+
+[tool.uv.sources]
+aioquic = { git = "https://github.com/nercone-forks/aioquic", branch = "feature/pqc-support" }
+
+[tool.uv.build-backend]
+module-name = "kaede"
