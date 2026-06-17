@@ -3,9 +3,8 @@ from __future__ import annotations
 import os
 import asyncio
 import ipaddress
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from ..api import ClientHandler, ServerHandler
 from ..http import H1, H2, H2WSUpgrade
 from ..tls import TLSInfo, TLSContext, RecordTLS
 from ..models import Request, Response, Headers
@@ -13,6 +12,9 @@ from ..process import process_request
 from ..websocket import WebSocket, WebSocketProtocolError, compute_accept, parse_frames
 from .common import parse_peername, negotiate_websocket, MAX_RESPONSE_HEADER_SIZE, StreamState, dispatch_event, consume_response
 from .tls_transport import TLSTransport, tls_start, tls_feed
+
+if TYPE_CHECKING:
+    from ..api import ClientHandler, ServerHandler
 
 class H2WebSocketTransport:
     def __init__(self, h2: H2, stream_id: int, transport: asyncio.Transport):

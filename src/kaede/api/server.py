@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from ..tls import TLSContext, TLSServerConfig
 from ..models import Listener, Callback
 from ..websocket import WebSocket
-from ..handler.tcp import TCPProtocol
+from ..handler.tcp import TCPServerProtocol
 from ..handler.quic import QuicServerProtocol
 
 @dataclass
@@ -76,11 +76,11 @@ class Handler:
         kind = self.listener.kind
 
         if kind in ("http", "unix"):
-            self.tcp_server = await loop.create_server(lambda: TCPProtocol(self), sock=self.listener.sock)
+            self.tcp_server = await loop.create_server(lambda: TCPServerProtocol(self), sock=self.listener.sock)
 
         elif kind == "https":
             self.tls_server_context()
-            self.tcp_server = await loop.create_server(lambda: TCPProtocol(self), sock=self.listener.sock)
+            self.tcp_server = await loop.create_server(lambda: TCPServerProtocol(self), sock=self.listener.sock)
 
         elif kind == "quic":
             transport, _ = await loop.create_datagram_endpoint(lambda: QuicServerProtocol(self), sock=self.listener.sock)
