@@ -75,7 +75,7 @@ def build_request(method: str, url: str, config: Config, headers: dict[str, str]
 
     return request, host, port, authority
 
-class ClientHandler:
+class Handler:
     def __init__(self, config: Config):
         self.config = config
 
@@ -312,7 +312,7 @@ class ClientHandler:
         self.idle.clear()
 
 class StreamContext:
-    def __init__(self, handler: ClientHandler, method: str, url: str, headers: dict[str, str] | None, body: bytes | None):
+    def __init__(self, handler: Handler, method: str, url: str, headers: dict[str, str] | None, body: bytes | None):
         self.handler = handler
         self.method = method
         self.url = url
@@ -334,7 +334,7 @@ class StreamContext:
 class Client:
     def __init__(self, config: Config | None = None):
         self.config = config or Config()
-        self.handler = ClientHandler(self.config)
+        self.handler = Handler(self.config)
 
     async def request(self, method: str, url: str, *, headers: dict[str, str] | None = None, body: bytes | None = None) -> Response:
         return await self.handler.request(method, url, headers, body, streaming=False)

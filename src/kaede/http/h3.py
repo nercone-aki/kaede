@@ -11,7 +11,7 @@ from ..process import process_request
 from ..quic import QUICConnection, HandshakeCompleted, StreamDataReceived, ConnectionTerminated
 from ..quic.packet import Buffer, encode_uint_var
 from ..quic.stream import stream_is_bidirectional
-from ..tls.quic_tls import QuicTLS
+from ..quic.tls import QuicTLS
 from ..handler.common import StreamState, consume_response
 
 H3_FORBIDDEN_HEADERS = ("connection", "transfer-encoding", "keep-alive", "upgrade", "proxy-connection")

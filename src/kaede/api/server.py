@@ -45,7 +45,7 @@ class Config:
     auto_restart: bool = True
     shutdown_timeout: float = 30
 
-class ServerHandler:
+class Handler:
     def __init__(self, listener: Listener, callback: Callback, config: Config):
         self.listener = listener
         self.callback = callback
@@ -275,7 +275,7 @@ class Server:
                     pass
 
     async def serve(self, listeners: list[Listener] | None = None):
-        handlers = [ServerHandler(listener, self.callback, self.config) for listener in (listeners if listeners is not None else self.listeners())]
+        handlers = [Handler(listener, self.callback, self.config) for listener in (listeners if listeners is not None else self.listeners())]
 
         for handler in handlers:
             await handler.start()
