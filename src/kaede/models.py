@@ -11,8 +11,8 @@ from .tls import TLSInfo
 from .websocket import WebSocket
 
 if TYPE_CHECKING:
-    from .h2 import H2Info
-    from .h3 import H3Info
+    from .http.h2 import H2Info
+    from .http.h3 import H3Info
 
 @dataclass
 class Request:

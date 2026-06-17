@@ -14,6 +14,9 @@ class WriteTransport(Protocol):
     def write(self, data: bytes): ...
     def close(self): ...
 
+class WebSocketProtocolError(Exception):
+    pass
+
 class Opcode(IntEnum):
     CONTINUATION = 0x0
     TEXT = 0x1
@@ -70,7 +73,12 @@ def parse_frames(buf: bytearray, max_payload_size: int | None = None) -> list[Fr
         fin = bool(b1 & 0x80)
         rsv1 = bool(b1 & 0x40)
         rsv_other = bool(b1 & 0x30)
-        opcode = Opcode(b1 & 0x0F)
+
+        try:
+            opcode = Opcode(b1 & 0x0F)
+        except ValueError:
+            raise WebSocketProtocolError(f"unknown websocket opcode 0x{b1 & 0x0F:x}")
+
         masked = bool(b2 & 0x80)
         length = b2 & 0x7F
         offset = 2

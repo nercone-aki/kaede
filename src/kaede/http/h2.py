@@ -12,8 +12,8 @@ import h2.errors
 import h2.events
 from h2.settings import SettingCodes
 
-from .models import Request, Response, Headers, RequestStream, ResponseStream
-from .tls import TLSInfo
+from ..models import Request, Response, Headers, RequestStream, ResponseStream
+from ..tls import TLSInfo
 
 H2_FORBIDDEN_HEADERS = ("connection", "transfer-encoding", "keep-alive", "upgrade", "proxy-connection")
 

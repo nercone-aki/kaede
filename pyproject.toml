@@ -12,7 +12,7 @@ license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "h2",
-    "aioquic",
+    "cryptography",
     "uvloop",
     "async-lru",
     "minify-html",
@@ -25,9 +25,6 @@ dependencies = [
 
 [project.urls]
 GitHub = "https://github.com/nercone-aki/kaede/"
-
-[tool.uv.sources]
-aioquic = { git = "https://github.com/nercone-forks/aioquic", branch = "feature/pqc-support" }
 
 [tool.uv.build-backend]
 module-name = "kaede"

@@ -5,8 +5,8 @@ import ipaddress
 from http import HTTPStatus
 from typing import Literal
 
-from .models import Request, Response, Headers
-from .tls import TLSInfo
+from ..models import Request, Response, Headers
+from ..tls import TLSInfo
 
 class H1:
     @staticmethod

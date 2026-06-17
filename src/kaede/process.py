@@ -22,8 +22,8 @@ from scour import scour
 from .models import Request, Response, Callback
 
 if TYPE_CHECKING:
-    from .server import Config as ServerConfig
-    from .client import Config as ClientConfig
+    from .api.server import Config as ServerConfig
+    from .api.client import Config as ClientConfig
 
 def size_limited_cache(maxsize: int, max_cacheable_body_size: int = 1024 * 1024):
     def decorator(fn):
@@ -304,16 +304,29 @@ def decompress_once(data: bytes, encoding: str, max_size: int | None) -> bytes:
             return zlib_decompress(data, -zlib.MAX_WBITS, max_size)
 
     if enc == "br":
-        out = brotlicffi.decompress(data)
-        if max_size is not None and len(out) > max_size:
-            raise ValueError("decompressed body exceeds max_body_size")
-        return out
+        d = brotlicffi.Decompressor()
+        out = bytearray()
+        chunk = 65536
+
+        for i in range(0, len(data), chunk):
+            out.extend(d.process(data[i:i + chunk]))
+            if max_size is not None and len(out) > max_size:
+                raise ValueError("decompressed body exceeds max_body_size")
+
+        return bytes(out)
 
     if enc == "zstd":
-        out = zstandard.ZstdDecompressor().decompressobj().decompress(data)
-        if max_size is not None and len(out) > max_size:
-            raise ValueError("decompressed body exceeds max_body_size")
-        return out
+        dobj = zstandard.ZstdDecompressor().decompressobj()
+
+        if max_size is not None:
+            out = dobj.decompress(data, max_length=max_size + 1)
+
+            if len(out) > max_size or dobj.decompress(b"", max_length=1):
+                raise ValueError("decompressed body exceeds max_body_size")
+
+            return out
+
+        return dobj.decompress(data)
 
     raise ValueError(f"unsupported Content-Encoding: {enc!r}")
 

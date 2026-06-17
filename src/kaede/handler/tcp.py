@@ -2,75 +2,16 @@ from __future__ import annotations
 
 import os
 import ssl
-import signal
-import socket
-import uvloop
 import asyncio
 import ipaddress
 from typing import Literal
-from dataclasses import dataclass, field
 
-from aioquic.quic.events import HandshakeCompleted
-from aioquic.quic.configuration import QuicConfiguration
-from aioquic.asyncio.server import QuicServer
-from aioquic.asyncio.protocol import QuicConnectionProtocol
-
-from .h1 import H1
-from .h2 import H2, H2WSUpgrade
-from .h3 import H3, H3WSUpgrade
-from .tls import TLS, TLSInfo, TLSServerConfig
-from .models import Listener, Callback, Request, Response
-from .process import process_request
-from .websocket import WebSocket, PerMessageDeflate, compute_accept, parse_frames
-
-@dataclass
-class Config:
-    server_name: str = "Kaede"
-
-    bind_unix:  list[os.PathLike] = field(default_factory=list)
-    bind_http:  list[str] = field(default_factory=lambda: ["127.0.0.1:80", "[::1]:80"])
-    bind_https: list[str] = field(default_factory=list)
-    bind_quic:  list[str] = field(default_factory=list)
-
-    protocols: list[Literal["http/1.1", "h2", "h3"]] = field(default_factory=lambda: ["h3", "h2", "http/1.1"])
-
-    tls: TLSServerConfig = field(default_factory=lambda: TLSServerConfig())
-
-    keepalive_timeout: float = 75
-
-    max_header_size: int = 64 * 1024
-    max_body_size: int = 16 * 1024 * 1024
-
-    max_stream_buffer_size: int = 1024 * 1024
-    max_pipeline_buffer_len: int = 100
-    max_websocket_message_size: int = 4 * 1024 * 1024
-
-    max_concurrent_streams: int = 100
-    max_stream_resets: int = 1000
-
-    workers: int = 1
-    auto_restart: bool = True
-    shutdown_timeout: float = 30
-
-def parse_peername(transport: asyncio.BaseTransport) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int]:
-    peer = transport.get_extra_info("peername")
-    if not peer:
-        return (ipaddress.IPv4Address("0.0.0.0"), 0)
-    host, port = peer[0], peer[1]
-    try:
-        return (ipaddress.ip_address(host), int(port))
-    except ValueError:
-        return (ipaddress.IPv4Address("0.0.0.0"), int(port))
-
-def negotiate_websocket(request: Request, subprotocols: list[str]) -> tuple[str | None, PerMessageDeflate | None]:
-    offered_raw = request.headers.get("Sec-WebSocket-Protocol") or ""
-    offered = [p.strip() for p in offered_raw.split(",") if p.strip()] if offered_raw else [] # type: ignore
-    subprotocol: str | None = next((subprotocol for subprotocol in offered if subprotocol in subprotocols), None)
-
-    ext_raw = request.headers.get("Sec-WebSocket-Extensions") or ""
-    deflate = PerMessageDeflate.from_client_offer(ext_raw) if ext_raw else None # type: ignore
-
-    return subprotocol, deflate
+from ..http import H1, H2, H2WSUpgrade
+from ..tls import TLS, TLSInfo
+from ..models import Request, Response, Headers
+from ..process import process_request
+from ..websocket import WebSocket, WebSocketProtocolError, compute_accept, parse_frames
+from .common import parse_peername, negotiate_websocket, MAX_RESPONSE_HEADER_SIZE, StreamState, dispatch_event, consume_response
 
 class H2WebSocketTransport:
     def __init__(self, h2: H2, stream_id: int, transport: asyncio.Transport):
@@ -89,22 +30,6 @@ class H2WebSocketTransport:
         out = self.h2.websocket_close(self.stream_id)
         if out and not self.transport.is_closing():
             self.transport.write(out)
-
-class H3WebSocketTransport:
-    def __init__(self, h3: H3, stream_id: int, protocol: H3Protocol):
-        self.h3 = h3
-        self.stream_id = stream_id
-        self.protocol = protocol
-
-    def write(self, data: bytes):
-        if not data:
-            return
-        self.h3.websocket_send(self.stream_id, data)
-        self.protocol.transmit()
-
-    def close(self):
-        self.h3.websocket_close(self.stream_id)
-        self.protocol.transmit()
 
 class TCPProtocol(asyncio.Protocol):
     def __init__(self, handler: Handler):
@@ -193,6 +118,9 @@ class TCPProtocol(asyncio.Protocol):
 
             try:
                 frames = parse_frames(self.websocket_buffer, self.handler.config.max_websocket_message_size)
+            except WebSocketProtocolError:
+                self.websocket.close_transport(1002)
+                return
             except ValueError:
                 self.websocket.close_transport(1009)
                 return
@@ -340,7 +268,7 @@ class TCPProtocol(asyncio.Protocol):
                 consumed = body_start
 
             try:
-                request = H1.parse_request(bytes(self.buffer[:consumed]), client=self.client, secure=self.secure, tls=self.tls, max_body_size=self.handler.config.max_body_size)
+                request = H1.parse_request(bytes(self.buffer[:consumed]), client=self.client, scheme="https" if self.secure else "http", secure=self.secure, tls=self.tls, max_body_size=self.handler.config.max_body_size)
             except (ValueError, UnicodeDecodeError):
                 self.transport.close()
                 return
@@ -562,6 +490,9 @@ class TCPProtocol(asyncio.Protocol):
         if self.websocket_buffer:
             try:
                 frames = parse_frames(self.websocket_buffer, self.handler.config.max_websocket_message_size)
+            except WebSocketProtocolError:
+                ws.close_transport(1002)
+                return
             except ValueError:
                 ws.close_transport(1009)
                 return
@@ -682,6 +613,9 @@ class TCPProtocol(asyncio.Protocol):
             buf.extend(chunk)
             try:
                 frames = parse_frames(buf, self.handler.config.max_websocket_message_size)
+            except WebSocketProtocolError:
+                ws.close_transport(1002)
+                break
             except ValueError:
                 ws.close_transport(1009)
                 break
@@ -726,138 +660,337 @@ class TCPProtocol(asyncio.Protocol):
 H1Protocol = TCPProtocol
 H2Protocol = TCPProtocol
 
-class H3Protocol(QuicConnectionProtocol):
-    def __init__(self, *args, handler: Handler, **kwargs):
-        super().__init__(*args, **kwargs)
+class TCPClientProtocol(asyncio.Protocol):
+    def __init__(self, handler: Handler, key: tuple, authority: str):
         self.handler = handler
-        self.client: tuple = (ipaddress.IPv4Address("0.0.0.0"), 0)
+        self.key = key
+        self.authority = authority
 
-        self.h3: H3 | None = None
-        self.tls: TLSInfo | None = None
+        self.transport: asyncio.Transport | None = None
+        self.ready: asyncio.Future = asyncio.get_running_loop().create_future()
+        self.closed = False
 
-    def quic_event_received(self, event):
-        if isinstance(event, HandshakeCompleted) and self.tls is None:
-            self.tls = TLS.extract_tls_info_h3(self._quic)
+        self.mode: Literal["h1", "h2"] = "h1"
+        self.multiplexed = False
 
-        if self.h3 is None:
-            self.h3 = H3(self._quic, connection_id=self._quic.host_cid, max_body_size=self.handler.config.max_body_size)
-            self.client = parse_peername(self._transport)
+        # HTTP/1.1
+        self.buffer = bytearray()
+        self.current: StreamState | None = None
+        self.method = "GET"
+        self.state = "idle"
+        self.remaining = 0
+        self.chunk_remaining = 0
+        self.headers: Headers | None = None
+        self.reusable = False
 
-        requests, websocket_upgrades = self.h3.handle_event(event, client=self.client, secure=True, tls=self.tls)
+        # HTTP/2
+        self.h2: H2 | None = None
+        self.h2_settings: asyncio.Event = asyncio.Event()
+        self.streams: dict[int, StreamState] = {}
 
-        for request in requests:
-            self.handler.create_task(self.respond(request))
+    def connection_made(self, transport: asyncio.BaseTransport):
+        self.transport = transport
 
-        for websocket_upgrade in websocket_upgrades:
-            self.handler.create_task(self.websocket_response(websocket_upgrade))
+        ssl_object: ssl.SSLObject | None = transport.get_extra_info("ssl_object")
+        if ssl_object is not None and ssl_object.selected_alpn_protocol() == "h2":
+            self.mode = "h2"
+            self.multiplexed = True
+            self.h2 = H2(client_side=True, max_body_size=self.handler.config.max_body_size, max_concurrent_streams=self.handler.config.max_concurrent_streams)
+            self.transport.write(self.h2.initiate())
 
-    async def respond(self, request: Request):
-        if self.h3 is None or request.h3 is None:
-            return
+        if not self.ready.done():
+            self.ready.set_result(None)
 
-        response = await process_request(request, callback=self.handler.callback, config=self.handler.config)
-
-        if response.is_streaming:
-            await self.stream(request.h3.stream_id, response)
-            return
-
-        alt_body = self.h3.send(request.h3.stream_id, response)
-
-        if alt_body is not None:
-            await self.send_file(request.h3.stream_id, alt_body, response.file_range)
-
+    def data_received(self, data: bytes):
+        if self.mode == "h2":
+            self.feed_h2(data)
         else:
-            self.transmit()
+            self.feed_h1(data)
 
-    async def stream(self, stream_id: int, response: Response):
-        if self.h3 is None:
-            return
+    def connection_lost(self, exc: BaseException | None):
+        self.closed = True
+        self.transport = None
 
-        self.h3.send_headers_only(stream_id, response)
-        self.transmit()
+        if self.h2 is not None:
+            for queue in self.h2.websocket_streams.values():
+                queue.put_nowait(None)
+            for state in list(self.streams.values()):
+                state.fail(exc or ConnectionError("connection closed"))
+
+        if self.current is not None:
+            if self.state == "close":
+                self.current.finish()
+            elif not self.current.ended:
+                self.current.fail(exc or ConnectionError("connection closed"))
+            self.current = None
+
+    def is_open(self) -> bool:
+        return self.transport is not None and not self.closed
+
+    def keepalive(self) -> bool:
+        if self.headers is None:
+            return False
+        return "close" not in (self.headers.get("Connection") or "").lower()
+
+    def close(self):
+        if self.transport is not None and not self.transport.is_closing():
+            self.transport.close()
+
+    async def request(self, request: Request, streaming: bool) -> Response:
+        if self.mode == "h2":
+            return await self.h2_request(request, streaming)
+        return await self.h1_request(request, streaming)
+
+    def feed_h1(self, data: bytes):
+        self.buffer.extend(data)
+
+        while self.current is not None:
+            if self.state == "head":
+                idx = self.buffer.find(b"\r\n\r\n")
+                if idx == -1:
+                    if len(self.buffer) > MAX_RESPONSE_HEADER_SIZE:
+                        self.fail_h1(ValueError("response header too large"))
+                    return
+
+                head = bytes(self.buffer[:idx])
+                del self.buffer[:idx + 4]
+
+                try:
+                    status, _, headers = H1.parse_response_head(head)
+                except ValueError as exc:
+                    self.fail_h1(exc)
+                    return
+
+                if 100 <= status < 200 and status != 101:
+                    continue
+
+                self.headers = headers
+
+                if H1.response_has_no_body(status, self.method):
+                    self.current.set_headers(status, headers)
+                    self.finish_h1()
+                    return
+
+                transfer_encoding = (headers.get("Transfer-Encoding") or "").lower()
+                content_length = headers.get("Content-Length")
+
+                if transfer_encoding:
+                    te_tokens = [t.strip() for t in transfer_encoding.split(",") if t.strip()]
+
+                    if te_tokens[-1:] != ["chunked"]:
+                        self.fail_h1(ValueError("invalid Transfer-Encoding"))
+                        return
+
+                    self.current.set_headers(status, headers)
+                    self.state = "chunk-size"
+
+                elif content_length is not None:
+                    if isinstance(content_length, list) or not (content_length.isascii() and content_length.isdigit()):
+                        self.fail_h1(ValueError("invalid Content-Length"))
+                        return
+
+                    self.remaining = int(content_length)
+                    self.current.set_headers(status, headers)
+
+                    if self.remaining == 0:
+                        self.finish_h1()
+                        return
+
+                    self.state = "length"
+
+                else:
+                    self.current.set_headers(status, headers)
+                    self.state = "close"
+
+            elif self.state == "length":
+                if not self.buffer:
+                    return
+
+                take = min(self.remaining, len(self.buffer))
+                self.current.push(bytes(self.buffer[:take]))
+
+                del self.buffer[:take]
+                self.remaining -= take
+
+                if self.remaining == 0:
+                    self.finish_h1()
+                    return
+
+                return
+
+            elif self.state == "close":
+                if self.buffer:
+                    self.current.push(bytes(self.buffer))
+                    self.buffer.clear()
+
+                return
+
+            elif self.state in ("chunk-size", "chunk-data", "chunk-data-crlf", "chunk-trailer"):
+                if not self.feed_h1_chunked():
+                    return
+
+            else:
+                return
+
+    def feed_h1_chunked(self) -> bool:
+        if self.state == "chunk-size":
+            end = self.buffer.find(b"\r\n")
+            if end == -1:
+                return False
+
+            line = bytes(self.buffer[:end]).split(b";", 1)[0].strip()
+            del self.buffer[:end + 2]
+
+            try:
+                size = int(line, 16)
+
+            except ValueError:
+                self.fail_h1(ValueError("invalid chunk size"))
+                return False
+
+            if size < 0:
+                self.fail_h1(ValueError("negative chunk size"))
+                return False
+
+            if size == 0:
+                self.state = "chunk-trailer"
+                return True
+
+            self.chunk_remaining = size
+            self.state = "chunk-data"
+            return True
+
+        if self.state == "chunk-data":
+            if not self.buffer:
+                return False
+
+            take = min(self.chunk_remaining, len(self.buffer))
+            self.current.push(bytes(self.buffer[:take]))
+
+            del self.buffer[:take]
+            self.chunk_remaining -= take
+
+            if self.chunk_remaining == 0:
+                self.state = "chunk-data-crlf"
+
+            return True
+
+        if self.state == "chunk-data-crlf":
+            if len(self.buffer) < 2:
+                return False
+
+            if bytes(self.buffer[:2]) != b"\r\n":
+                self.fail_h1(ValueError("malformed chunk terminator"))
+                return False
+
+            del self.buffer[:2]
+
+            self.state = "chunk-size"
+            return True
+
+        if self.state == "chunk-trailer":
+            end = self.buffer.find(b"\r\n")
+            if end == -1:
+                return False
+
+            is_empty = end == 0
+
+            del self.buffer[:end + 2]
+
+            if is_empty:
+                self.finish_h1()
+                return False
+
+            return True
+
+        return False
+
+    async def h1_request(self, request: Request, streaming: bool) -> Response:
+        if self.transport is None:
+            raise ConnectionError("connection is not available")
+
+        self.method = request.method
+        self.reusable = False
+        self.current = StreamState(asyncio.get_running_loop(), self.handler.config.max_body_size)
+        self.headers = None
+        self.state = "head"
+
+        if request.body:
+            request.headers.set("Content-Length", str(len(request.body)), override=True)
+
+        elif request.method in ("POST", "PUT", "PATCH", "DELETE"):
+            request.headers.set("Content-Length", "0", override=False)
+
+        request.headers.set("Connection", "keep-alive", override=False)
+
+        self.transport.write(H1.build_request(request))
+
+        def on_done():
+            self.handler.release_h1(self)
 
         try:
-            async for chunk in response.body:
-                if chunk and self.h3 is not None:
-                    self.h3.send_chunk(stream_id, chunk, end_stream=False)
-                    self.transmit()
+            return await consume_response(self.current, streaming, "HTTP/1.1", self.handler.config.read_timeout, on_done)
+        except BaseException:
+            self.close()
+            self.handler.discard(self)
+            raise
 
-        finally:
-            if self.h3 is not None:
-                self.h3.send_chunk(stream_id, b"", end_stream=True)
-                self.transmit()
+    def finish_h1(self):
+        if self.current is not None:
+            self.current.finish()
+        self.reusable = self.is_open() and self.keepalive()
+        self.current = None
+        self.state = "idle"
 
-    async def send_file(self, stream_id: int, path: os.PathLike, file_range: tuple[int, int] | None = None):
-        if self.h3 is None:
+    def fail_h1(self, exc: BaseException):
+        if self.current is not None:
+            self.current.fail(exc)
+            self.current = None
+        self.reusable = False
+        self.state = "idle"
+        self.close()
+
+    def feed_h2(self, data: bytes):
+        if self.h2 is None or self.transport is None:
             return
-        loop = asyncio.get_running_loop()
+
+        out, events, closed = self.h2.receive_response(data)
+        if out:
+            self.transport.write(out)
+
+        for event in events:
+            if event[0] == "settings":
+                self.h2_settings.set()
+                continue
+            dispatch_event(self.streams, event)
+
+        if closed:
+            self.close()
+
+    async def h2_request(self, request: Request, streaming: bool) -> Response:
+        if self.h2 is None or self.transport is None:
+            raise ConnectionError("connection is not available")
+
+        stream_id, out = self.h2.send_request(request, self.authority)
+        state = StreamState(asyncio.get_running_loop(), self.handler.config.max_body_size)
+        self.streams[stream_id] = state
+
+        if out:
+            self.transport.write(out)
+
+        def on_done():
+            self.streams.pop(stream_id, None)
 
         try:
-            fp = await loop.run_in_executor(None, lambda: open(os.fspath(path), "rb"))
-        except OSError:
-            self.h3.send_chunk(stream_id, b"", end_stream=True)
-            self.transmit()
+            return await consume_response(state, streaming, "HTTP/2.0", self.handler.config.read_timeout, on_done)
+        except BaseException:
+            self.streams.pop(stream_id, None)
+            raise
+
+    async def h2_websocket_read(self, stream_id: int, ws: WebSocket):
+        if self.h2 is None:
             return
-
-        sent_any = False
-        try:
-            remaining = None
-            if file_range is not None:
-                start, end = file_range
-                await loop.run_in_executor(None, fp.seek, start)
-                remaining = end - start + 1
-
-            pending = await loop.run_in_executor(None, fp.read, 65536 if remaining is None else min(65536, remaining))
-            while pending and self.h3 is not None:
-                if remaining is not None:
-                    remaining -= len(pending)
-                size = 65536 if remaining is None else min(65536, remaining)
-                nxt = await loop.run_in_executor(None, fp.read, size) if size > 0 else b""
-                is_last = not nxt
-                self.h3.send_chunk(stream_id, pending, end_stream=is_last)
-                self.transmit()
-                sent_any = True
-                pending = nxt
-
-        finally:
-            await loop.run_in_executor(None, fp.close)
-
-        if not sent_any and self.h3 is not None:
-            self.h3.send_chunk(stream_id, b"", end_stream=True)
-            self.transmit()
-
-    async def websocket_response(self, upgrade: H3WSUpgrade):
-        if self.h3 is None:
-            return
-
-        subprotocol, deflate = negotiate_websocket(upgrade.request, self.handler.callback.websocket_subprotocols)
-
-        self.h3.ws_accept(upgrade.stream_id, subprotocol=subprotocol, extensions=deflate.response_header() if deflate is not None else None)
-        self.transmit()
-
-        ws_transport = H3WebSocketTransport(self.h3, upgrade.stream_id, self)
-        ws = WebSocket(ws_transport, require_masking=False, subprotocol=subprotocol, deflate=deflate, max_message_size=self.handler.config.max_websocket_message_size)
-
-        self.handler.create_task(self.websocket_read(upgrade.stream_id, ws))
-
-        request = upgrade.request
-        self.handler.active_websockets.add(ws)
-
-        try:
-            await self.handler.callback.on_websocket(request, ws)
-        except Exception:
-            pass
-
-        finally:
-            self.handler.active_websockets.discard(ws)
-            if not ws.closed:
-                await ws.close(1011)
-
-    async def websocket_read(self, stream_id: int, ws: WebSocket):
-        if self.h3 is None:
-            return
-
-        queue = self.h3.websocket_streams.get(stream_id)
+        queue = self.h2.websocket_streams.get(stream_id)
         if queue is None:
             return
 
@@ -872,252 +1005,116 @@ class H3Protocol(QuicConnectionProtocol):
 
             try:
                 frames = parse_frames(buf, self.handler.config.max_websocket_message_size)
+            except WebSocketProtocolError:
+                ws.close_transport(1002)
+                break
             except ValueError:
                 ws.close_transport(1009)
                 break
+
             for frame in frames:
                 ws.feed_frame(frame)
 
-class Handler:
-    def __init__(self, listener: Listener, callback: Callback, config: Config):
-        self.listener = listener
-        self.callback = callback
-        self.config = config
-        self.shutdown = False
+    async def websocket(self, request: Request, subprotocols: list[str] | None) -> WebSocket:
+        if self.h2 is None or self.transport is None:
+            raise ConnectionError("connection is not available")
 
-        self.tcp_server: asyncio.base_events.Server | None = None
-        self.quic_server: QuicServer = None
+        await asyncio.wait_for(self.h2_settings.wait(), self.handler.config.read_timeout)
 
-        self.active_tasks: set[asyncio.Task] = set()
-        self.active_transports: set[asyncio.Transport] = set()
-        self.active_websockets: set[WebSocket] = set()
+        stream_id, out = self.h2.send_connect_websocket(request, self.authority, subprotocols)
+        state = StreamState(asyncio.get_running_loop(), self.handler.config.max_body_size)
+        self.streams[stream_id] = state
 
-    def create_task(self, coro) -> asyncio.Task:
-        task = asyncio.create_task(coro)
-        self.active_tasks.add(task)
-        task.add_done_callback(self.active_tasks.discard)
-        return task
+        if out:
+            self.transport.write(out)
 
-    async def start(self):
-        loop = asyncio.get_running_loop()
-        kind = self.listener.kind
+        try:
+            status, headers = await asyncio.wait_for(state.header_future, self.handler.config.read_timeout)
+        finally:
+            self.streams.pop(stream_id, None)
 
-        if kind in ("http", "unix"):
-            self.tcp_server = await loop.create_server(lambda: TCPProtocol(self), sock=self.listener.sock)
+        if status != 200:
+            self.h2.discard_send(stream_id)
+            raise ConnectionError(f"websocket upgrade rejected with status {status}")
 
-        elif kind == "https":
-            ssl_context = TLS.from_server_config(self.config).context
-            self.tcp_server = await loop.create_server(lambda: TCPProtocol(self), sock=self.listener.sock, ssl=ssl_context)
+        subprotocol = (headers.get("Sec-WebSocket-Protocol") or "").strip() or None
+        ws = WebSocket(H2ClientWSTransport(self, stream_id), require_masking=False, mask_frames=True, subprotocol=subprotocol, max_message_size=self.handler.config.max_websocket_message_size)
 
-        elif kind == "quic":
-            quic_config = QuicConfiguration(is_client=False, alpn_protocols=["h3"], max_datagram_frame_size=65536)
-            if self.config.tls.certfile:
-                quic_config.load_cert_chain(self.config.tls.certfile, self.config.tls.keyfile)
+        self.handler.create_task(self.h2_websocket_read(stream_id, ws))
+        return ws
 
-            _, self.quic_server = await loop.create_datagram_endpoint(lambda: QuicServer(configuration=quic_config, create_protocol=lambda *a, **kw: H3Protocol(*a, handler=self, **kw)), sock=self.listener.sock)
+class H2ClientWSTransport:
+    def __init__(self, conn: TCPClientProtocol, stream_id: int):
+        self.conn = conn
+        self.stream_id = stream_id
 
-        else:
-            raise ValueError(f"unsupported listener kind: {kind!r}")
+    def write(self, data: bytes):
+        if self.conn.h2 is None or self.conn.transport is None:
+            return
+        out = self.conn.h2.send_body_chunk(self.stream_id, data, end_stream=False)
+        if out:
+            self.conn.transport.write(out)
 
-    async def stop(self):
-        if self.tcp_server is not None:
-            self.tcp_server.close()
-            try:
-                await self.tcp_server.wait_closed()
-            except Exception:
-                pass
-            self.tcp_server = None
+    def close(self):
+        if self.conn.h2 is None or self.conn.transport is None:
+            return
+        out = self.conn.h2.websocket_close(self.stream_id)
+        if out:
+            self.conn.transport.write(out)
 
-        if self.quic_server is not None:
-            self.quic_server.close()
-            self.quic_server = None
+class WSClientProtocol(asyncio.Protocol):
+    def __init__(self, loop: asyncio.AbstractEventLoop, max_message_size: int):
+        self.transport: asyncio.Transport | None = None
+        self.buffer = bytearray()
+        self.handshake: asyncio.Future = loop.create_future()
+        self.ws: WebSocket | None = None
+        self.max_message_size = max_message_size
 
-    async def drain(self, timeout: float):
-        self.shutdown = True
+    def connection_made(self, transport: asyncio.BaseTransport):
+        self.transport = transport
 
-        if self.tcp_server is not None:
-            self.tcp_server.close()
-
-        for websocket in list(self.active_websockets):
-            if not websocket.closed:
-                try:
-                    await websocket.close(1001, "Server shutdown")
-                except Exception:
-                    pass
-
-        tasks = list(self.active_tasks)
-        if tasks:
-            _, pending = await asyncio.wait(tasks, timeout=timeout)
-
-            for task in pending:
-                task.cancel()
-
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-
-        for transport in list(self.active_transports):
-            if not transport.is_closing():
-                transport.close()
-
-class Server:
-    def __init__(self, callback: Callback, config: Config | None = None):
-        self.callback = callback
-        self.config = config or Config()
-
-    def bind_unix(self, path: os.PathLike) -> socket.socket:
-        if os.path.exists(path):
-            os.unlink(path)
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.bind(os.fspath(path))
-        sock.listen(socket.SOMAXCONN)
-        sock.setblocking(False)
-        return sock
-
-    def bind_socket(self, host: str, port: int, type: socket.SocketKind) -> socket.socket:
-        family = socket.AF_INET6 if ":" in host else socket.AF_INET
-        sock = socket.socket(family, type)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if hasattr(socket, "SO_REUSEPORT"):
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError:
-                pass
-        if family == socket.AF_INET6:
-            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-        sock.bind((host, port))
-        if type == socket.SOCK_STREAM:
-            sock.listen(socket.SOMAXCONN)
-        sock.setblocking(False)
-        return sock
-
-    def parse_host_port(self, value: str) -> tuple[str, int]:
-        host, sep, port = value.rpartition(":")
-        if not sep:
-            raise ValueError(f"invalid bind address {value!r}: expected 'host:port'")
-        if host.startswith("[") and host.endswith("]"):
-            host = host[1:-1]
-        return host, int(port)
-
-    def listeners(self, *, include_quic: bool = True) -> list[Listener]:
-        listeners: list[Listener] = []
-
-        h1_enabled = "http/1.1" in self.config.protocols
-        h2_enabled = "h2" in self.config.protocols
-        h3_enabled = "h3" in self.config.protocols
-
-        if h1_enabled:
-            for path in self.config.bind_unix:
-                listeners.append(Listener(self.bind_unix(path), "unix"))
-
-            for value in self.config.bind_http:
-                host, port = self.parse_host_port(value)
-                listeners.append(Listener(self.bind_socket(host, port, socket.SOCK_STREAM), "http"))
-
-        if h1_enabled or h2_enabled:
-            for value in self.config.bind_https:
-                host, port = self.parse_host_port(value)
-                listeners.append(Listener(self.bind_socket(host, port, socket.SOCK_STREAM), "https"))
-
-        if h3_enabled and include_quic:
-            listeners.extend(self.quic_listeners())
-
-        return listeners
-
-    def quic_listeners(self) -> list[Listener]:
-        listeners: list[Listener] = []
-        if "h3" in self.config.protocols:
-            for value in self.config.bind_quic:
-                host, port = self.parse_host_port(value)
-                listeners.append(Listener(self.bind_socket(host, port, socket.SOCK_DGRAM), "quic"))
-        return listeners
-
-    def run(self):
-        workers = self.config.workers if self.config.workers > 0 else (os.cpu_count() or 1)
-
-        if workers == 1:
-            uvloop.run(self.serve(self.listeners()))
+    def data_received(self, data: bytes):
+        if self.ws is None:
+            self.buffer.extend(data)
+            idx = self.buffer.find(b"\r\n\r\n")
+            if idx == -1:
+                if len(self.buffer) > MAX_RESPONSE_HEADER_SIZE and not self.handshake.done():
+                    self.handshake.set_exception(ValueError("websocket handshake header too large"))
+                return
+            head = bytes(self.buffer[:idx])
+            del self.buffer[:idx + 4]
+            if not self.handshake.done():
+                self.handshake.set_result(head)
             return
 
-        if not hasattr(os, "fork"):
-            raise RuntimeError("multiprocessing requires a Unix platform (os.fork not available)")
-
-        alive: set[int] = set()
-        shutting_down = False
-
-        shared = self.listeners(include_quic=False)
-
-        def spawn_worker() -> int:
-            pid = os.fork()
-            if pid == 0:
-                try:
-                    uvloop.run(self.serve(shared + self.quic_listeners()))
-                except KeyboardInterrupt:
-                    pass
-                finally:
-                    os._exit(0)
-            alive.add(pid)
-            return pid
-
-        for _ in range(workers):
-            spawn_worker()
-
-        def forward_signal(signum, frame):
-            nonlocal shutting_down
-            shutting_down = True
-            for pid in list(alive):
-                try:
-                    os.kill(pid, signum)
-                except ProcessLookupError:
-                    pass
-
-        signal.signal(signal.SIGINT, forward_signal)
-        signal.signal(signal.SIGTERM, forward_signal)
-
+        self.buffer.extend(data)
         try:
-            while alive:
-                try:
-                    pid, _ = os.wait()
-                    alive.discard(pid)
+            frames = parse_frames(self.buffer, self.max_message_size)
+        except WebSocketProtocolError:
+            self.ws.close_transport(1002)
+            return
+        except ValueError:
+            self.ws.close_transport(1009)
+            return
+        for frame in frames:
+            self.ws.feed_frame(frame)
 
-                    if not shutting_down and self.config.auto_restart:
-                        spawn_worker()
+    def activate(self, ws: WebSocket):
+        self.ws = ws
+        if self.buffer:
+            try:
+                frames = parse_frames(self.buffer, self.max_message_size)
+            except WebSocketProtocolError:
+                ws.close_transport(1002)
+                return
+            except ValueError:
+                ws.close_transport(1009)
+                return
+            for frame in frames:
+                ws.feed_frame(frame)
 
-                except ChildProcessError:
-                    break
-
-        finally:
-            for pid in alive:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-
-    async def serve(self, listeners: list[Listener] | None = None):
-        handlers = [Handler(listener, self.callback, self.config) for listener in (listeners if listeners is not None else self.listeners())]
-
-        for handler in handlers:
-            await handler.start()
-
-        loop = asyncio.get_running_loop()
-        stop = loop.create_future()
-
-        def handle_signal():
-            if not stop.done():
-                stop.set_result(None)
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, handle_signal)
-
-        try:
-            await stop
-        finally:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, lambda: None)
-
-            await asyncio.gather(*[handler.drain(self.config.shutdown_timeout) for handler in handlers], return_exceptions=True)
-
-            for handler in handlers:
-                await handler.stop()
-
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.remove_signal_handler(sig)
+    def connection_lost(self, exc: BaseException | None):
+        if not self.handshake.done():
+            self.handshake.set_exception(exc or ConnectionError("connection closed during websocket handshake"))
+        if self.ws is not None and not self.ws.closed:
+            self.ws.queue.put_nowait(None)
