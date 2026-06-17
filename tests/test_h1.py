@@ -225,10 +225,320 @@ class TestH1ResponseHasNoBody:
         (304, "GET", True),
         (100, "GET", True),
         (199, "GET", True),
+        (101, "GET", True),
         (200, "GET", False),
         (201, "POST", False),
-        (301, "GET", False)
+        (205, "GET", False),
+        (301, "GET", False),
+        (200, "head", True),
     ])
 
     def test(self, status, method, expected):
         assert H1.response_has_no_body(status, method) is expected
+
+class TestH1ParseRequest2:
+    def _parse(self, raw, **kwargs):
+        return H1.parse_request(raw, client=CLIENT, **kwargs)
+
+    def test_zero_content_length_body_is_none(self):
+        raw = b"POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n"
+        req = self._parse(raw)
+        assert req.body is None
+
+    def test_content_length_truncates_excess_data(self):
+        raw = b"POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\nhelloXXXX"
+        req = self._parse(raw)
+        assert req.body == b"hel"
+
+    def test_folded_header_raises(self):
+        raw = b"GET / HTTP/1.1\r\nHost: example.com\r\n folded-continuation\r\n\r\n"
+        with pytest.raises(ValueError):
+            self._parse(raw)
+
+    def test_invalid_transfer_encoding_not_chunked(self):
+        raw = b"POST / HTTP/1.1\r\nTransfer-Encoding: identity\r\n\r\n"
+        with pytest.raises(ValueError):
+            self._parse(raw)
+
+    def test_transfer_encoding_trailing_chunked_is_valid(self):
+        raw = (
+            b"POST / HTTP/1.1\r\n"
+            b"Transfer-Encoding: gzip, chunked\r\n"
+            b"\r\n"
+            b"5\r\nhello\r\n"
+            b"0\r\n\r\n"
+        )
+        req = self._parse(raw)
+        assert req.body == b"hello"
+
+    def test_duplicate_chunked_in_te_raises(self):
+        raw = (
+            b"POST / HTTP/1.1\r\n"
+            b"Transfer-Encoding: chunked, chunked\r\n"
+            b"\r\n"
+            b"0\r\n\r\n"
+        )
+        with pytest.raises(ValueError):
+            self._parse(raw)
+
+    def test_options_method(self):
+        raw = b"OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n"
+        req = self._parse(raw)
+        assert req.method == "OPTIONS"
+        assert req.target == "*"
+
+    def test_target_with_query_string(self):
+        raw = b"GET /search?q=hello&lang=en HTTP/1.1\r\n\r\n"
+        req = self._parse(raw)
+        assert req.target == "/search?q=hello&lang=en"
+
+    def test_empty_header_value_allowed(self):
+        raw = b"GET / HTTP/1.1\r\nX-Empty: \r\n\r\n"
+        req = self._parse(raw)
+        assert req.headers.get("X-Empty") == ""
+
+    def test_header_without_colon_raises(self):
+        raw = b"GET / HTTP/1.1\r\nBadHeader\r\n\r\n"
+        with pytest.raises(ValueError):
+            self._parse(raw)
+
+    def test_large_chunked_body(self):
+        chunk_size = 10000
+        chunk_data = b"x" * chunk_size
+        raw = (
+            b"POST / HTTP/1.1\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            + f"{chunk_size:x}\r\n".encode()
+            + chunk_data + b"\r\n"
+            + b"0\r\n\r\n"
+        )
+        req = self._parse(raw)
+        assert req.body == chunk_data
+
+    def test_ipv6_client_propagated(self):
+        raw = b"GET / HTTP/1.1\r\n\r\n"
+        addr = (ipaddress.IPv6Address("::1"), 9000)
+        req = H1.parse_request(raw, client=addr)
+        assert req.client == addr
+
+class TestH1BuildResponse2:
+    def test_streaming_body_returns_tuple(self):
+        async def gen():
+            yield b"chunk"
+        r = Response(body=gen(), status_code=200)
+        result = H1.build_response(r)
+        assert isinstance(result, tuple)
+        head, body = result
+        assert b"HTTP/1.1 200" in head
+        assert body is not None
+
+    def test_null_byte_in_header_name_filtered(self):
+        r = Response(body=b"ok", status_code=200)
+        r.headers.set("X-\x00Evil", "value")
+        head = H1.build_response_head(r)
+        assert b"X-\x00Evil" not in head
+
+    def test_null_byte_in_header_value_filtered(self):
+        r = Response(body=b"ok", status_code=200)
+        r.headers.set("X-Header", "val\x00ue")
+        head = H1.build_response_head(r)
+        assert b"val\x00ue" not in head
+
+    def test_custom_header_in_output(self):
+        r = Response(body=b"hello", status_code=200)
+        r.headers.set("X-Request-Id", "abc123")
+        result = H1.build_response(r)
+        assert b"x-request-id: abc123" in result
+
+    def test_204_has_no_phrase_body(self):
+        r = Response(body=None, status_code=204)
+        head, body = H1.build_response(r)
+        assert b"204 No Content" in head
+        assert body is None
+
+    def test_response_with_multiple_headers(self):
+        r = Response(body=b"data", status_code=200)
+        r.headers.set("Content-Type", "application/json")
+        r.headers.set("Cache-Control", "no-cache")
+        result = H1.build_response(r)
+        assert b"content-type: application/json" in result
+        assert b"cache-control: no-cache" in result
+
+class TestH1BuildRequest2:
+    def test_no_body_request(self):
+        r = Request(method="GET", target="/index.html")
+        result = H1.build_request(r)
+        assert b"GET /index.html HTTP/1.1\r\n" in result
+        assert result.endswith(b"\r\n")
+
+    def test_header_injection_in_key_filtered(self):
+        r = Request(method="GET", target="/")
+        r.headers.set("X-\r\nEvil", "value")
+        head = H1.build_request_head(r)
+        assert b"Evil" not in head
+
+    def test_header_injection_in_value_filtered(self):
+        r = Request(method="GET", target="/")
+        r.headers.set("X-Test", "value\r\nInjected: yes")
+        head = H1.build_request_head(r)
+        assert b"Injected" not in head
+
+    def test_delete_method(self):
+        r = Request(method="DELETE", target="/resource/1")
+        result = H1.build_request(r)
+        assert b"DELETE /resource/1 HTTP/1.1\r\n" in result
+
+class TestH1ParseResponse2:
+    def test_no_content_length_reads_rest(self):
+        raw = b"HTTP/1.1 200 OK\r\n\r\nhello world"
+        resp = H1.parse_response(raw)
+        assert resp.body == b"hello world"
+
+    def test_empty_body_no_content_length(self):
+        raw = b"HTTP/1.1 200 OK\r\n\r\n"
+        resp = H1.parse_response(raw)
+        assert resp.body is None
+
+    def test_chunked_with_trailer_fields(self):
+        raw = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"5\r\nhello\r\n"
+            b"0\r\n"
+            b"X-Trailer: value\r\n"
+            b"\r\n"
+        )
+        resp = H1.parse_response(raw)
+        assert resp.body == b"hello"
+
+    def test_max_body_size_content_length_response(self):
+        body = b"x" * 200
+        raw = b"HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n" + body
+        with pytest.raises(ValueError, match="max_body_size"):
+            H1.parse_response(raw, max_body_size=100)
+
+    def test_max_body_size_chunked_response(self):
+        raw = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Transfer-Encoding: chunked\r\n"
+            b"\r\n"
+            b"c8\r\n" + b"x" * 200 + b"\r\n"
+            b"0\r\n\r\n"
+        )
+        with pytest.raises(ValueError, match="max_body_size"):
+            H1.parse_response(raw, max_body_size=100)
+
+    def test_invalid_content_length_string(self):
+        raw = b"HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\nbody"
+        with pytest.raises(ValueError, match="invalid Content-Length"):
+            H1.parse_response(raw)
+
+    def test_invalid_transfer_encoding_response(self):
+        raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: identity\r\n\r\n"
+        with pytest.raises(ValueError, match="invalid Transfer-Encoding"):
+            H1.parse_response(raw)
+
+    def test_204_ignores_content_length(self):
+        raw = b"HTTP/1.1 204 No Content\r\nContent-Length: 10\r\n\r\nBODYDATA!!"
+        resp = H1.parse_response(raw)
+        assert resp.status_code == 204
+        assert resp.body is None
+
+    def test_status_code_propagated(self):
+        raw = b"HTTP/1.1 301 Moved Permanently\r\nLocation: /new\r\n\r\n"
+        resp = H1.parse_response(raw)
+        assert resp.status_code == 301
+
+    def test_protocol_is_h11(self):
+        raw = b"HTTP/1.1 200 OK\r\n\r\n"
+        resp = H1.parse_response(raw)
+        assert resp.protocol == "HTTP/1.1"
+
+class TestH1ParseResponseHead:
+    def test_basic(self):
+        status, phrase, headers = H1.parse_response_head(b"HTTP/1.1 200 OK\r\nX-Foo: bar")
+        assert status == 200
+        assert phrase == "OK"
+        assert headers.get("X-Foo") == "bar"
+
+    def test_no_phrase(self):
+        status, phrase, headers = H1.parse_response_head(b"HTTP/1.1 200")
+        assert status == 200
+        assert phrase == ""
+
+    def test_wrong_version_raises(self):
+        with pytest.raises(ValueError, match="unsupported HTTP version"):
+            H1.parse_response_head(b"HTTP/2.0 200 OK")
+
+    def test_invalid_status_non_digit_raises(self):
+        with pytest.raises(ValueError, match="invalid HTTP status code"):
+            H1.parse_response_head(b"HTTP/1.1 ABC OK")
+
+    def test_malformed_status_line_raises(self):
+        with pytest.raises(ValueError, match="malformed HTTP/1.1 status line"):
+            H1.parse_response_head(b"HTTP/1.1")
+
+    def test_empty_status_line_raises(self):
+        with pytest.raises(ValueError, match="empty HTTP/1.1 status line"):
+            H1.parse_response_head(b"")
+
+    def test_multiple_headers(self):
+        head = b"HTTP/1.1 200 OK\r\nA: 1\r\nB: 2"
+        _, _, headers = H1.parse_response_head(head)
+        assert headers.get("A") == "1"
+        assert headers.get("B") == "2"
+
+class TestH1ScanChunked:
+    def test_negative_chunk_size_raises(self):
+        with pytest.raises(ValueError, match="negative chunk size"):
+            H1.scan_chunked(b"-1\r\nhello\r\n0\r\n\r\n")
+
+    def test_trailer_with_fields_skipped(self):
+        data = (
+            b"5\r\nhello\r\n"
+            b"0\r\n"
+            b"X-Trailer: ignored\r\n"
+            b"\r\n"
+        )
+        result = H1.scan_chunked(data)
+        assert result is not None
+        body, consumed = result
+        assert body == b"hello"
+
+    def test_incomplete_after_chunk_data_returns_none(self):
+        result = H1.scan_chunked(b"5\r\nhell")
+        assert result is None
+
+    def test_incomplete_trailer_returns_none(self):
+        result = H1.scan_chunked(b"5\r\nhello\r\n0\r\nX-Trailer: val")
+        assert result is None
+
+    def test_multiple_chunks_assembled(self):
+        data = b"3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n"
+        result = H1.scan_chunked(data)
+        assert result is not None
+        body, _ = result
+        assert body == b"abcdef"
+
+    def test_all_empty_chunks_body_is_none(self):
+        result = H1.scan_chunked(b"0\r\n\r\n")
+        assert result is not None
+        body, _ = result
+        assert body is None
+
+    def test_consumed_offset_correct(self):
+        data = b"3\r\nabc\r\n0\r\n\r\nEXTRA"
+        result = H1.scan_chunked(data)
+        assert result is not None
+        body, consumed = result
+        assert body == b"abc"
+        assert data[consumed:] == b"EXTRA"
+
+    def test_chunk_size_with_hex_uppercase(self):
+        data = b"A\r\n" + b"x" * 10 + b"\r\n0\r\n\r\n"
+        result = H1.scan_chunked(data)
+        assert result is not None
+        body, _ = result
+        assert body == b"x" * 10

@@ -77,6 +77,40 @@ class TestBuildFrame:
         frame = build_frame(Opcode.TEXT, b"compressed", rsv1=True)
         assert frame[0] & 0x40
 
+    def test_empty_payload(self):
+        frame = build_frame(Opcode.TEXT, b"")
+        assert frame[0] == 0x81
+        assert frame[1] == 0
+
+    def test_exactly_125_bytes_is_single_byte_length(self):
+        payload = b"x" * 125
+        frame = build_frame(Opcode.BINARY, payload)
+        assert frame[1] == 125
+
+    def test_exactly_126_bytes_is_medium_length(self):
+        payload = b"x" * 126
+        frame = build_frame(Opcode.BINARY, payload)
+        assert frame[1] == 126
+        assert struct.unpack_from(">H", frame, 2)[0] == 126
+
+    def test_exactly_65535_bytes_is_medium_max(self):
+        payload = b"x" * 65535
+        frame = build_frame(Opcode.BINARY, payload)
+        assert frame[1] == 126
+        assert struct.unpack_from(">H", frame, 2)[0] == 65535
+
+    def test_fin_bit_set_by_default(self):
+        frame = build_frame(Opcode.TEXT, b"hi")
+        assert frame[0] & 0x80
+
+    def test_no_rsv_by_default(self):
+        frame = build_frame(Opcode.TEXT, b"hi")
+        assert not (frame[0] & 0x70)
+
+    def test_continuation_opcode(self):
+        frame = build_frame(Opcode.CONTINUATION, b"cont")
+        assert frame[0] & 0x0F == 0x00
+
 class TestParseFrames:
     def test_single_text_frame(self):
         buf = bytearray(build_frame(Opcode.TEXT, b"hello"))
@@ -132,6 +166,40 @@ class TestParseFrames:
         parse_frames(buf)
         assert len(buf) == 0
 
+    def test_incomplete_medium_length_header(self):
+        buf = bytearray(b"\x82\x7e\x00")
+        frames = parse_frames(buf)
+        assert frames == []
+
+    def test_incomplete_large_length_header(self):
+        buf = bytearray(b"\x82\x7f\x00\x00\x00\x00\x00\x00\x00")
+        frames = parse_frames(buf)
+        assert frames == []
+
+    def test_rsv1_preserved_in_frame(self):
+        raw = bytearray(build_frame(Opcode.TEXT, b"data", rsv1=True))
+        frames = parse_frames(raw)
+        assert frames[0].rsv1 is True
+
+    def test_fin_false_preserved(self):
+        raw = bytearray(build_frame(Opcode.TEXT, b"frag", fin=False))
+        frames = parse_frames(raw)
+        assert frames[0].fin is False
+
+    def test_partial_second_frame_leaves_first_only(self):
+        complete = build_frame(Opcode.TEXT, b"first")
+        incomplete = b"\x81"
+        buf = bytearray(complete + incomplete)
+        frames = parse_frames(buf)
+        assert len(frames) == 1
+        assert frames[0].payload == b"first"
+        assert len(buf) == 1
+
+    def test_masked_bit_preserved(self):
+        buf = bytearray(build_frame(Opcode.TEXT, b"masked", mask=True))
+        frames = parse_frames(buf)
+        assert frames[0].masked is True
+
 class TestPerMessageDeflate:
     def test_compress_decompress_roundtrip(self):
         pmd = PerMessageDeflate()
@@ -175,6 +243,63 @@ class TestPerMessageDeflate:
     def test_window_bits_clamped(self):
         pmd = PerMessageDeflate.from_client_offer("permessage-deflate; server_max_window_bits=99")
         assert pmd.server_max_window_bits == 15
+
+    def test_context_reuse_server_false(self):
+        pmd = PerMessageDeflate(server_no_context_takeover=False)
+        data = b"repeated repeated repeated" * 50
+        c1 = pmd.compress(data)
+        assert pmd.compress_ctx is not None
+        c2 = pmd.compress(data)
+        assert pmd.compress_ctx is not None
+        assert pmd.decompress(c1) == data
+        assert pmd.decompress(c2) == data
+
+    def test_no_context_takeover_true_creates_new_ctx_each_time(self):
+        pmd = PerMessageDeflate(server_no_context_takeover=True)
+        data = b"hello" * 100
+        c1 = pmd.compress(data)
+        c2 = pmd.compress(data)
+        assert pmd.compress_ctx is None
+
+    def test_decompress_context_reuse(self):
+        pmd = PerMessageDeflate(client_no_context_takeover=False)
+        data = b"hello world" * 10
+        compressed = pmd.compress(data)
+        out1 = pmd.decompress(compressed)
+        compressed2 = pmd.compress(data)
+        out2 = pmd.decompress(compressed2)
+        assert out1 == data
+        assert out2 == data
+
+    def test_response_header_client_no_context_takeover(self):
+        pmd = PerMessageDeflate(server_no_context_takeover=False, client_no_context_takeover=True)
+        header = pmd.response_header()
+        assert "client_no_context_takeover" in header
+        assert "server_no_context_takeover" not in header
+
+    def test_response_header_custom_window_bits(self):
+        pmd = PerMessageDeflate(server_max_window_bits=12, client_max_window_bits=10)
+        header = pmd.response_header()
+        assert "server_max_window_bits=12" in header
+        assert "client_max_window_bits=10" in header
+
+    def test_from_client_offer_multiple_offers_first_wins(self):
+        offer = "identity, permessage-deflate; server_max_window_bits=12"
+        pmd = PerMessageDeflate.from_client_offer(offer)
+        assert pmd is not None
+        assert pmd.server_max_window_bits == 12
+
+    def test_from_client_offer_invalid_window_bits_uses_default(self):
+        pmd = PerMessageDeflate.from_client_offer("permessage-deflate; server_max_window_bits=abc")
+        assert pmd is not None
+        assert pmd.server_max_window_bits == 15
+
+    def test_compress_then_decompress_large(self):
+        pmd = PerMessageDeflate()
+        data = b"large data block " * 5000
+        compressed = pmd.compress(data)
+        result = pmd.decompress(compressed)
+        assert result == data
 
 class MockTransport:
     def __init__(self):
@@ -316,3 +441,103 @@ class TestWebSocket:
         ws.feed_frame(frames[0])
         msg = ws.queue.get_nowait()
         assert msg == data
+
+    def test_control_frame_not_fin_closes_with_1002(self):
+        ws, transport = self._make_ws(require_masking=False)
+        frame = parse_frames(bytearray(build_frame(Opcode.PING, b"ping", fin=False, mask=False)))[0]
+        ws.feed_frame(frame)
+        assert ws.closed is True
+
+    def test_ping_payload_too_large_closes_1002(self):
+        ws, transport = self._make_ws(require_masking=False)
+        big_payload = b"x" * 126
+        raw = bytearray(build_frame(Opcode.PING, big_payload, mask=False))
+        frames = parse_frames(raw)
+        ws.feed_frame(frames[0])
+        assert ws.closed is True
+
+    def test_continuation_without_prior_frame_closes(self):
+        ws, transport = self._make_ws(require_masking=False)
+        frame = parse_frames(bytearray(build_frame(Opcode.CONTINUATION, b"data", mask=False)))[0]
+        ws.feed_frame(frame)
+        assert ws.closed is True
+
+    def test_text_frame_while_fragments_pending_closes(self):
+        ws, _ = self._make_ws(require_masking=False)
+        f1 = bytearray(build_frame(Opcode.TEXT, b"start", fin=False, mask=False))
+        ws.feed_frame(parse_frames(f1)[0])
+        f2 = bytearray(build_frame(Opcode.TEXT, b"new_start", fin=True, mask=False))
+        ws.feed_frame(parse_frames(f2)[0])
+        assert ws.closed is True
+
+    def test_rsv1_without_deflate_closes(self):
+        ws, transport = self._make_ws(require_masking=False)
+        raw = bytearray(build_frame(Opcode.TEXT, b"compressed", rsv1=True, mask=False))
+        ws.feed_frame(parse_frames(raw)[0])
+        assert ws.closed is True
+
+    def test_max_message_size_continuation_closes(self):
+        ws, _ = self._make_ws(require_masking=False, max_message_size=10)
+        f1 = bytearray(build_frame(Opcode.TEXT, b"hello", fin=False, mask=False))
+        ws.feed_frame(parse_frames(f1)[0])
+        f2 = bytearray(build_frame(Opcode.CONTINUATION, b" world!!!", fin=True, mask=False))
+        ws.feed_frame(parse_frames(f2)[0])
+        assert ws.closed is True
+
+    def test_pong_frame_not_enqueued(self):
+        ws, _ = self._make_ws(require_masking=False)
+        frame = parse_frames(bytearray(build_frame(Opcode.PONG, b"pong", mask=False)))[0]
+        ws.feed_frame(frame)
+        assert ws.queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_close_already_closed_is_noop(self):
+        ws, transport = self._make_ws(require_masking=False)
+        ws.closed = True
+        await ws.close(1000, "bye")
+        assert not transport.written
+
+    @pytest.mark.asyncio
+    async def test_close_with_reason_encodes_message(self):
+        ws, transport = self._make_ws(require_masking=False)
+        await ws.close(1001, "going away")
+        assert transport.written
+        frame = parse_frames(bytearray(transport.written[0]))[0]
+        assert frame.opcode == Opcode.CLOSE
+        assert frame.payload[2:].decode("utf-8") == "going away"
+
+    @pytest.mark.asyncio
+    async def test_ping_closed_is_noop(self):
+        ws, transport = self._make_ws(require_masking=False)
+        ws.closed = True
+        await ws.ping(b"test")
+        assert not transport.written
+
+    @pytest.mark.asyncio
+    async def test_send_text_with_deflate(self):
+        pmd = PerMessageDeflate()
+        ws, transport = self._make_ws(require_masking=False, deflate=pmd)
+        await ws.send("hello deflate")
+        assert len(transport.written) == 1
+        frame = parse_frames(bytearray(transport.written[0]))[0]
+        assert frame.opcode == Opcode.TEXT
+        assert frame.rsv1 is True
+
+    @pytest.mark.asyncio
+    async def test_send_bytes_with_deflate(self):
+        pmd = PerMessageDeflate()
+        ws, transport = self._make_ws(require_masking=False, deflate=pmd)
+        await ws.send(b"\x01\x02\x03")
+        assert transport.written
+        frame = parse_frames(bytearray(transport.written[0]))[0]
+        assert frame.opcode == Opcode.BINARY
+        assert frame.rsv1 is True
+
+    def test_close_frame_empty_payload_echoes_empty(self):
+        ws, transport = self._make_ws(require_masking=False)
+        frame = parse_frames(bytearray(build_frame(Opcode.CLOSE, b"", mask=False)))[0]
+        ws.feed_frame(frame)
+        assert ws.closed is True
+        echo = parse_frames(bytearray(transport.written[0]))
+        assert echo[0].opcode == Opcode.CLOSE
+        assert echo[0].payload == b""

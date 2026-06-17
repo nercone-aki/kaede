@@ -1,5 +1,6 @@
+import os
 import ipaddress
-from kaede.models import Headers, Request, Response
+from kaede.models import Headers, Request, Response, RequestStream, ResponseStream, Callback
 
 class TestHeaders:
     def test_case_insensitive_set_get(self):
@@ -81,6 +82,90 @@ class TestHeaders:
         assert "Accept-Encoding" in vary
         assert "Accept-Language" in vary
 
+    def test_set_cookie_single_value_returns_list(self):
+        h = Headers({})
+        h.append("Set-Cookie", "session=abc")
+        result = h.get("Set-Cookie")
+        assert isinstance(result, list)
+        assert result == ["session=abc"]
+
+    def test_set_cookie_case_insensitive(self):
+        h = Headers({})
+        h.append("set-cookie", "x=1")
+        assert isinstance(h.get("Set-Cookie"), list)
+
+    def test_remove_nonexistent_is_silent(self):
+        h = Headers({})
+        h.remove("X-Does-Not-Exist")
+
+    def test_items_multi_value_expands(self):
+        h = Headers({})
+        h.append("X-Multi", "a")
+        h.append("X-Multi", "b")
+        pairs = [(k, v) for k, v in h.items() if k == "x-multi"]
+        assert len(pairs) == 2
+        values = [v for _, v in pairs]
+        assert "a" in values and "b" in values
+
+    def test_getitem_missing_returns_none(self):
+        h = Headers({})
+        assert h["X-Missing"] is None
+
+    def test_set_with_lowercase_key(self):
+        h = Headers({})
+        h.set("content-type", "text/plain")
+        assert h.get("Content-Type") == "text/plain"
+        assert h.get("content-type") == "text/plain"
+
+    def test_append_vary_case_insensitive_dedup(self):
+        h = Headers({})
+        h.append_vary("Accept-Encoding")
+        h.append_vary("accept-encoding")
+        vary = h.get("Vary")
+        assert vary.count("ncoding") == 1
+
+    def test_append_vary_multiple_distinct(self):
+        h = Headers({})
+        h.append_vary("Accept-Encoding")
+        h.append_vary("Accept-Language")
+        h.append_vary("Origin")
+        vary = h.get("Vary")
+        assert "Accept-Encoding" in vary
+        assert "Accept-Language" in vary
+        assert "Origin" in vary
+
+    def test_get_returns_default_for_missing(self):
+        h = Headers({})
+        assert h.get("X-Missing", "fallback") == "fallback"
+
+    def test_get_default_none_for_missing(self):
+        h = Headers({})
+        assert h.get("X-Missing") is None
+
+    def test_contains_after_remove(self):
+        h = Headers({"X-Foo": "bar"})
+        h.remove("X-Foo")
+        assert "X-Foo" not in h
+        assert "x-foo" not in h
+
+    def test_set_no_override_keeps_original(self):
+        h = Headers({"X-A": "original"})
+        h.set("X-A", "new", override=False)
+        assert h.get("X-A") == "original"
+
+    def test_multiple_set_cookie_preserved_as_list(self):
+        h = Headers({})
+        for i in range(5):
+            h.append("Set-Cookie", f"key{i}=val{i}")
+        result = h.get("set-cookie")
+        assert isinstance(result, list)
+        assert len(result) == 5
+
+    def test_items_returns_lowercase_keys(self):
+        h = Headers({"Content-Type": "text/html", "X-Custom": "yes"})
+        keys = [k for k, _ in h.items()]
+        assert all(k == k.lower() for k in keys)
+
 class TestRequest:
     def _make_request(self, **kwargs):
         defaults = dict(method="GET", target="/")
@@ -126,6 +211,76 @@ class TestRequest:
         assert r.client[0] == ipaddress.IPv4Address("0.0.0.0")
         assert r.client[1] == 0
 
+    def test_websocket_connection_multi_token(self):
+        h = Headers({
+            "Upgrade": "websocket",
+            "Connection": "keep-alive, Upgrade",
+            "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+            "Sec-WebSocket-Version": "13",
+        })
+        r = self._make_request(headers=h)
+        assert r.is_websocket_upgrade is True
+
+    def test_websocket_upgrade_value_case_insensitive(self):
+        h = Headers({
+            "Upgrade": "WebSocket",
+            "Connection": "Upgrade",
+            "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+            "Sec-WebSocket-Version": "13",
+        })
+        r = self._make_request(headers=h)
+        assert r.is_websocket_upgrade is True
+
+    def test_websocket_false_without_upgrade_header(self):
+        r = self._make_request()
+        assert r.is_websocket_upgrade is False
+
+    def test_websocket_false_wrong_upgrade_value(self):
+        h = Headers({
+            "Upgrade": "h2c",
+            "Connection": "Upgrade",
+            "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+            "Sec-WebSocket-Version": "13",
+        })
+        r = self._make_request(headers=h)
+        assert r.is_websocket_upgrade is False
+
+    def test_websocket_false_no_connection_header(self):
+        h = Headers({
+            "Upgrade": "websocket",
+            "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+            "Sec-WebSocket-Version": "13",
+        })
+        r = self._make_request(headers=h)
+        assert r.is_websocket_upgrade is False
+
+    def test_ipv6_client(self):
+        addr = ipaddress.IPv6Address("::1")
+        r = self._make_request(client=(addr, 8080))
+        assert r.client[0] == addr
+        assert r.client[1] == 8080
+
+    def test_default_scheme_is_http(self):
+        r = self._make_request()
+        assert r.scheme == "http"
+
+    def test_default_secure_is_false(self):
+        r = self._make_request()
+        assert r.secure is False
+
+    def test_default_protocol(self):
+        r = self._make_request()
+        assert r.protocol == "HTTP/1.1"
+
+    def test_default_body_is_none(self):
+        r = self._make_request()
+        assert r.body is None
+
+    def test_all_http_methods_constructible(self):
+        for method in ("GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"):
+            r = self._make_request(method=method)
+            assert r.method == method
+
 class TestResponse:
     def test_has_real_body_bytes(self):
         r = Response(body=b"hello")
@@ -162,3 +317,60 @@ class TestResponse:
     def test_default_minification_off(self):
         r = Response()
         assert r.minification is False
+
+    def test_pathlike_body_is_not_streaming(self):
+        r = Response(body=os.path.join("some", "file.txt"))
+        assert r.is_streaming is False
+
+    def test_pathlike_body_is_not_real_body(self):
+        r = Response(body=os.path.join("some", "file.txt"))
+        assert r.has_real_body is False
+
+    def test_none_body_is_not_streaming(self):
+        r = Response(body=None)
+        assert r.is_streaming is False
+
+    def test_default_content_type_is_none(self):
+        r = Response()
+        assert r.content_type is None
+
+    def test_default_protocol(self):
+        r = Response()
+        assert r.protocol == "HTTP/1.1"
+
+    def test_empty_bytes_body_is_real(self):
+        r = Response(body=b"")
+        assert r.has_real_body is True
+
+    def test_is_not_streaming_with_bytes(self):
+        r = Response(body=b"data")
+        assert r.is_streaming is False
+
+class TestRequestStream:
+    def test_defaults(self):
+        rs = RequestStream()
+        assert rs.method == ""
+        assert rs.target == ""
+        assert rs.scheme == "https"
+        assert rs.authority == ""
+        assert isinstance(rs.headers, Headers)
+        assert isinstance(rs.body, bytearray)
+        assert len(rs.body) == 0
+
+    def test_custom_fields(self):
+        rs = RequestStream(method="POST", target="/upload", authority="example.com")
+        assert rs.method == "POST"
+        assert rs.target == "/upload"
+        assert rs.authority == "example.com"
+
+class TestResponseStream:
+    def test_defaults(self):
+        rs = ResponseStream()
+        assert rs.status_code == 0
+        assert isinstance(rs.headers, Headers)
+        assert isinstance(rs.body, bytearray)
+        assert len(rs.body) == 0
+
+    def test_custom_fields(self):
+        rs = ResponseStream(status_code=200)
+        assert rs.status_code == 200
