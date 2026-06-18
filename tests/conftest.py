@@ -53,12 +53,14 @@ def tls_cert() -> tuple[str, str]:
 class QuicLoopback:
     """A connected client/server QUICConnection pair sharing a virtual network."""
 
-    def __init__(self, certfile: str, keyfile: str, alpn: tuple[str, ...] = ("h3",)):
+    def __init__(self, certfile: str, keyfile: str, alpn: tuple[str, ...] = ("h3",), retry: bool = False):
+        import os
         from kaede.quic.tls import QuicTLS
         from kaede.quic.connection import QUICConnection
         from kaede.tls.models import TLSServerConfig, TLSClientConfig
 
         self.now = 0.0
+        self.retry_secret = os.urandom(32)
         server_cfg = TLSServerConfig(certfile=certfile, keyfile=keyfile, verify_mode=ssl.CERT_NONE)
         client_cfg = TLSClientConfig(verify=False, check_hostname=False)
 
@@ -66,8 +68,18 @@ class QuicLoopback:
             lambda tp: QuicTLS.for_client(client_cfg, "localhost", alpn=alpn, transport_params=tp), "localhost",
         )
         initial = self.client.datagrams_to_send(self.now)
+
+        if retry:
+            # Server forces address validation: respond to the first Initial with
+            # a Retry, let the client re-send with the token, then create state.
+            retry_packet = QUICConnection.create_retry(initial[0][0], self.retry_secret)
+            self.client.receive_datagram(retry_packet, self.now)
+            initial = self.client.datagrams_to_send(self.now)
+
         self.server = QUICConnection.create_server(
-            initial[0][0], lambda tp: QuicTLS.for_server(server_cfg, alpn=alpn, transport_params=tp),
+            initial[0][0],
+            lambda tp: QuicTLS.for_server(server_cfg, alpn=alpn, transport_params=tp),
+            retry_secret=self.retry_secret if retry else None,
         )
         for datagram, _ in initial:
             self.server.receive_datagram(datagram, self.now)
@@ -108,6 +120,13 @@ def quic_pair(tls_cert):
         pytest.skip("OpenSSL QUIC-TLS API (3.5+) not available")
     certfile, keyfile = tls_cert
     return QuicLoopback(certfile, keyfile)
+
+@pytest.fixture
+def quic_pair_retry(tls_cert):
+    if not _quic_tls_available():
+        pytest.skip("OpenSSL QUIC-TLS API (3.5+) not available")
+    certfile, keyfile = tls_cert
+    return QuicLoopback(certfile, keyfile, retry=True)
 
 # --------------------------------------------------------------------------
 # HTTP/3 loopback harness

@@ -912,6 +912,7 @@ class H3Protocol(asyncio.DatagramProtocol):
         self.quic_tls_context = quic_tls_context
         self.connections_per_ip: dict[str, int] = {}
         self.max_connections_per_ip = max_connections_per_ip
+        self.retry_secret = os.urandom(32)  # per-process key for stateless Retry tokens
 
     def connection_made(self, transport):
         self.transport = transport
@@ -951,11 +952,28 @@ class H3Protocol(asyncio.DatagramProtocol):
             if self.connections_per_ip.get(ip, 0) >= self.max_connections_per_ip:
                 return
 
+            # Optional address validation via Retry (RFC 9000 §8.1).
+            retry_enabled = self.handler is not None and getattr(self.handler.config, "quic_retry", False)
+            if retry_enabled:
+                try:
+                    hdr = parse_long_header(data, 0)
+                except Exception:
+                    return
+                if not hdr.token:
+                    try:
+                        retry = QUICConnection.create_retry(data, self.retry_secret)
+                        if self.transport is not None:
+                            self.transport.sendto(retry, addr)
+                    except Exception:
+                        pass
+                    return
+
+            retry_secret = self.retry_secret if retry_enabled else None
             try:
                 if self.quic_tls_context is not None:
-                    quic = QUICConnection.create_server(data, lambda tp: self.quic_tls_context.connection(transport_params=tp))
+                    quic = QUICConnection.create_server(data, lambda tp: self.quic_tls_context.connection(transport_params=tp), retry_secret=retry_secret)
                 else:
-                    quic = QUICConnection.create_server(data, lambda tp: QuicTLS.for_server(self.handler.config.tls, transport_params=tp))
+                    quic = QUICConnection.create_server(data, lambda tp: QuicTLS.for_server(self.handler.config.tls, transport_params=tp), retry_secret=retry_secret)
             except Exception:
                 return
 

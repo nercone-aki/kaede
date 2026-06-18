@@ -43,6 +43,8 @@ class Config:
     max_concurrent_streams: int = 100
     max_stream_resets: int = 1000
 
+    quic_retry: bool = False  # RFC 9000 §8.1 address validation via Retry
+
     workers: int = 1
     auto_restart: bool = True
     shutdown_timeout: float = 30

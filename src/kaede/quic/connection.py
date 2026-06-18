@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hmac
+import hashlib
 from dataclasses import dataclass
 
 from . import frame as frames
@@ -29,9 +31,27 @@ TP_ACK_DELAY_EXPONENT = 0x0A
 TP_MAX_ACK_DELAY = 0x0B
 TP_ACTIVE_CONNECTION_ID_LIMIT = 0x0E
 TP_INITIAL_SCID = 0x0F
+TP_RETRY_SOURCE_CONNECTION_ID = 0x10
 TP_MAX_DATAGRAM_FRAME_SIZE = 0x20  # RFC 9221
 
 DEFAULT_MAX_DATAGRAM_FRAME_SIZE = 65535
+
+def make_retry_token(secret: bytes, original_dcid: bytes) -> bytes:
+    # Stateless Retry token (RFC 9000 §8.1.1): the original Destination
+    # Connection ID, authenticated with HMAC so it can be validated without
+    # per-client state. A production server would also bind the client address
+    # and an expiry timestamp.
+    mac = hmac.new(secret, original_dcid, hashlib.sha256).digest()[:16]
+    return original_dcid + mac
+
+def validate_retry_token(secret: bytes, token: bytes) -> bytes | None:
+    if len(token) < 24:  # >= 8-byte ODCID + 16-byte MAC
+        return None
+    original_dcid, mac = token[:-16], token[-16:]
+    expected = hmac.new(secret, original_dcid, hashlib.sha256).digest()[:16]
+    if hmac.compare_digest(mac, expected):
+        return original_dcid
+    return None
 
 DEFAULT_MAX_DATA = 1 << 24
 DEFAULT_MAX_STREAM_DATA = 1 << 20
@@ -86,7 +106,7 @@ def decode_transport_parameters(data: bytes) -> dict[int, int | bytes]:
         tp_id = buf.pull_uint_var()
         length = buf.pull_uint_var()
         raw = buf.pull_bytes(length)
-        if tp_id in (TP_ORIGINAL_DCID, TP_INITIAL_SCID, TP_STATELESS_RESET_TOKEN):
+        if tp_id in (TP_ORIGINAL_DCID, TP_INITIAL_SCID, TP_STATELESS_RESET_TOKEN, TP_RETRY_SOURCE_CONNECTION_ID):
             out[tp_id] = raw
         else:
             try:
@@ -195,6 +215,7 @@ class QUICConnection:
         self.local_uni_limit = DEFAULT_MAX_STREAMS
 
         self.retry_token: bytes = b""
+        self.retry_source_cid: bytes | None = None
 
         self._tls_factory = None
 
@@ -225,20 +246,43 @@ class QUICConnection:
         conn._tls_factory = tls_factory
         return conn
 
+    @staticmethod
+    def create_retry(first_datagram: bytes, retry_secret: bytes) -> bytes:
+        # RFC 9000 §8.1: generate a Retry packet for address validation. The
+        # token carries the original DCID so the retried Initial can be checked
+        # statelessly.
+        hdr = packet.parse_long_header(first_datagram, 0)
+        original_dcid = hdr.destination_cid
+        retry_scid = os.urandom(8)
+        token = make_retry_token(retry_secret, original_dcid)
+        return packet.build_retry(hdr.source_cid, retry_scid, token, original_dcid)
+
     @classmethod
-    def create_server(cls, first_datagram: bytes, tls_factory, local_tp_extra: dict | None = None) -> "QUICConnection":
+    def create_server(cls, first_datagram: bytes, tls_factory, local_tp_extra: dict | None = None, retry_secret: bytes | None = None) -> "QUICConnection":
         hdr = packet.parse_long_header(first_datagram, 0)
 
         original_dcid = hdr.destination_cid
         if len(original_dcid) < 8:
             raise ValueError(f"Initial packet DCID too short: {len(original_dcid)} bytes (minimum 8)")
 
+        # If Retry is enabled, the retried Initial must carry a valid token; its
+        # DCID is the Retry's SCID and is used for Initial keys, while the
+        # advertised original_destination_connection_id is the true ODCID.
+        advertised_odcid = original_dcid
+        retry_source_cid: bytes | None = None
+        if retry_secret is not None:
+            recovered = validate_retry_token(retry_secret, hdr.token)
+            if recovered is None:
+                raise ValueError("invalid or missing Retry token")
+            advertised_odcid = recovered
+            retry_source_cid = original_dcid
+
         remote_cid = hdr.source_cid
         local_cid = os.urandom(8)
         reset_token = os.urandom(16)
 
         tp = {
-            TP_ORIGINAL_DCID: original_dcid,
+            TP_ORIGINAL_DCID: advertised_odcid,
             TP_INITIAL_SCID: local_cid,
             TP_STATELESS_RESET_TOKEN: reset_token,
             TP_INITIAL_MAX_DATA: DEFAULT_MAX_DATA,
@@ -252,6 +296,9 @@ class QUICConnection:
             TP_MAX_UDP_PAYLOAD: MAX_DATAGRAM_SIZE,
             TP_MAX_DATAGRAM_FRAME_SIZE: DEFAULT_MAX_DATAGRAM_FRAME_SIZE
         }
+
+        if retry_source_cid is not None:
+            tp[TP_RETRY_SOURCE_CONNECTION_ID] = retry_source_cid
 
         if local_tp_extra:
             tp.update(local_tp_extra)
@@ -363,6 +410,16 @@ class QUICConnection:
                 peer_odcid = self.peer_transport_params.get(TP_ORIGINAL_DCID)
                 if not isinstance(peer_odcid, bytes) or peer_odcid != self.original_dcid:
                     self.close(0x08, "original_destination_connection_id mismatch", application=False)
+                    return
+
+                # RFC 9000 §7.3: validate retry_source_connection_id consistency.
+                peer_rscid = self.peer_transport_params.get(TP_RETRY_SOURCE_CONNECTION_ID)
+                if self.retry_source_cid is not None:
+                    if not isinstance(peer_rscid, bytes) or peer_rscid != self.retry_source_cid:
+                        self.close(0x08, "retry_source_connection_id mismatch", application=False)
+                        return
+                elif peer_rscid is not None:
+                    self.close(0x08, "unexpected retry_source_connection_id", application=False)
                     return
 
             self.peer_max_data = int(self.peer_transport_params.get(TP_INITIAL_MAX_DATA, DEFAULT_MAX_DATA) or 0)
@@ -822,6 +879,10 @@ class QUICConnection:
                         st.max_stream_data_pending = True
 
     def handle_retry(self, hdr, data: bytes, offset: int) -> None:
+        # RFC 9000 §17.2.5: a client accepts at most one Retry.
+        if self.retry_source_cid is not None:
+            return
+
         pn_offset = hdr.pn_offset
         if pn_offset + 16 > len(data):
             return
@@ -832,17 +893,21 @@ class QUICConnection:
         if not verify_retry_integrity_tag(pseudo_packet, integrity_tag):
             return
 
-        self.retry_token = hdr.token
-
         if not hdr.source_cid:
             return
+
+        self.retry_token = hdr.token
+        self.retry_source_cid = hdr.source_cid
 
         new_dcid = hdr.source_cid
         ck, sk = initial_keys(new_dcid)
         self.send_keys[LEVEL_INITIAL] = ck
         self.recv_keys[LEVEL_INITIAL] = sk
         self.remote_cid = new_dcid
-        self.remote_cid_set = True
+        # Send the retried Initial to the Retry's Source CID, but allow the
+        # server's chosen connection ID (the SCID in its first packet) to be
+        # adopted afterwards.
+        self.remote_cid_set = False
 
         initial_space = self.recovery.spaces[SPACE_INITIAL]
         for pkt in initial_space.sent.values():

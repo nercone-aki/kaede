@@ -219,6 +219,23 @@ def serialize_long_header_prefix(packet_type: int, version: int, dcid: bytes, sc
 
     return buf.data, first
 
+def build_retry(dcid: bytes, scid: bytes, token: bytes, original_dcid: bytes) -> bytes:
+    # RFC 9000 §17.2.5 Retry packet + RFC 9001 §5.8 Retry Integrity Tag.
+    from .crypto import retry_integrity_tag
+
+    buf = Buffer()
+    buf.push_uint8(PACKET_LONG_HEADER | PACKET_FIXED_BIT | (PACKET_TYPE_RETRY << 4) | (os.urandom(1)[0] & 0x0F))
+    buf.push_uint32(QUIC_VERSION_1)
+    buf.push_uint8(len(dcid))
+    buf.push_bytes(dcid)
+    buf.push_uint8(len(scid))
+    buf.push_bytes(scid)
+    buf.push_bytes(token)
+    without_tag = buf.data
+
+    pseudo = bytes([len(original_dcid)]) + original_dcid + without_tag
+    return without_tag + retry_integrity_tag(pseudo)
+
 def build_version_negotiation(client_dcid: bytes, client_scid: bytes) -> bytes:
     buf = Buffer()
     buf.push_uint8(0x80 | (os.urandom(1)[0] & 0x7F))

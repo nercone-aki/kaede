@@ -104,9 +104,13 @@ def initial_keys(destination_connection_id: bytes) -> tuple[PacketKeys, PacketKe
 
     return PacketKeys(client_secret, suite), PacketKeys(server_secret, suite)
 
-def verify_retry_integrity_tag(pseudo_packet: bytes, tag: bytes) -> bool:
+def retry_integrity_tag(pseudo_packet: bytes) -> bytes:
+    # RFC 9001 §5.8: AEAD_AES_128_GCM over the Retry Pseudo-Packet (as AAD) with
+    # fixed key/nonce; the 16-byte authentication tag is the Retry Integrity Tag.
     algo = hashes.SHA256()
     key = hkdf_expand_label(RETRY_INTEGRITY_SECRET, b"quic retry integrity", 16, algo)
     nonce = hkdf_expand_label(RETRY_INTEGRITY_SECRET, b"quic retry integrity nonce", 12, algo)
-    expected = AESGCM(key).encrypt(nonce, b"", pseudo_packet)
-    return expected == tag
+    return AESGCM(key).encrypt(nonce, b"", pseudo_packet)
+
+def verify_retry_integrity_tag(pseudo_packet: bytes, tag: bytes) -> bool:
+    return retry_integrity_tag(pseudo_packet) == tag
