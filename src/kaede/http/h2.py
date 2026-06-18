@@ -58,12 +58,14 @@ class H2:
             (":method", request.method),
             (":scheme", request.scheme),
             (":authority", authority),
-            (":path", request.target),
+            (":path", request.target)
         ]
 
         for name, value in request.headers.items():
             lname = name.lower()
             if lname in H2_FORBIDDEN_HEADERS or lname in ("host", "content-length"):
+                continue
+            if lname == "te" and value.strip().lower() != "trailers":
                 continue
             if any(c in lname for c in "\r\n\x00") or any(c in value for c in "\r\n\x00"):
                 continue
@@ -82,7 +84,7 @@ class H2:
             (":scheme", request.scheme),
             (":authority", authority),
             (":path", request.target),
-            ("sec-websocket-version", "13"),
+            ("sec-websocket-version", "13")
         ]
         if subprotocols:
             headers.append(("sec-websocket-protocol", ", ".join(subprotocols)))

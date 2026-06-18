@@ -211,6 +211,14 @@ def encode_headers(headers: list[tuple[bytes, bytes]]) -> bytes:
             out += encode_integer(full, 6, 0xC0)
             continue
 
+        name_idx = STATIC_INDEX_BY_NAME.get(name)
+        if name_idx is not None:
+            out += encode_integer(name_idx, 4, 0x50)
+            out += encode_string(value, 7, 0)
+        else:
+            out += encode_string(name, 3, 0x20)
+            out += encode_string(value, 7, 0)
+
     return bytes(out)
 
 def decode_headers(data: bytes) -> list[tuple[bytes, bytes]]:

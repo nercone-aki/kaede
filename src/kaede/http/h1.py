@@ -68,12 +68,24 @@ class H1:
 
             headers.append(name_b.decode("latin-1"), value_b.decode("latin-1").strip())
 
-        if not headers.get("Host"):
+        host_values = headers.headers.get("host", [])
+        if not host_values:
             raise ValueError("missing Host header in HTTP/1.1 request")
+        if len(host_values) > 1:
+            raise ValueError("multiple Host headers in HTTP/1.1 request")
 
         body: bytes | None = None
         transfer_encoding = (headers.get("Transfer-Encoding") or "").lower()
-        content_length = headers.get("Content-Length")
+
+        content_length_values = headers.headers.get("content-length", [])
+        if len(content_length_values) > 1:
+            if len(set(content_length_values)) != 1:
+                raise ValueError(f"conflicting Content-Length values: {content_length_values!r}")
+            content_length: str | None = content_length_values[0]
+        elif content_length_values:
+            content_length = content_length_values[0]
+        else:
+            content_length = None
 
         if transfer_encoding:
             te_tokens = [t.strip() for t in transfer_encoding.split(",") if t.strip()]
@@ -92,7 +104,7 @@ class H1:
             body = H1.decode_chunked(rest, max_body_size=max_body_size)
 
         elif content_length is not None:
-            if isinstance(content_length, list) or not (content_length.isascii() and content_length.isdigit()) or (len(content_length) > 1 and content_length[0] == "0"):
+            if not (content_length.isascii() and content_length.isdigit()) or (len(content_length) > 1 and content_length[0] == "0"):
                 raise ValueError(f"invalid Content-Length: {content_length!r}")
 
             n = int(content_length)
@@ -107,6 +119,8 @@ class H1:
             raise MethodNotImplementedError(f"unknown HTTP method: {method!r}")
 
         target = target_b.decode("latin-1")
+        if not target:
+            raise ValueError("empty request target")
         if "\x00" in target or "\r" in target or "\n" in target:
             raise ValueError("invalid character in request target")
 
