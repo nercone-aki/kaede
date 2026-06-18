@@ -37,9 +37,15 @@ class H1:
         for line in lines[1:]:
             if not line:
                 continue
+
+            if line[:1] in (b" ", b"\t"):
+                raise ValueError("obs-fold (header field continuation) is not permitted")
+
             name_b, sep_b, value_b = line.partition(b":")
+
             if not sep_b:
                 raise ValueError(f"malformed HTTP/1.1 header: {line!r}")
+
             headers.append(name_b.decode("latin-1").strip(), value_b.decode("latin-1").strip())
 
         body: bytes | None = None
@@ -48,8 +54,10 @@ class H1:
 
         if transfer_encoding:
             te_tokens = [t.strip() for t in transfer_encoding.split(",") if t.strip()]
+
             if te_tokens[-1:] != ["chunked"] or te_tokens.count("chunked") != 1:
                 raise ValueError(f"invalid Transfer-Encoding: {transfer_encoding!r}")
+
             is_chunked = True
         else:
             is_chunked = False
@@ -61,18 +69,25 @@ class H1:
             body = H1.decode_chunked(rest, max_body_size=max_body_size)
 
         elif content_length is not None:
-            if isinstance(content_length, list) or not (content_length.isascii() and content_length.isdigit()):
+            if isinstance(content_length, list) or not (content_length.isascii() and content_length.isdigit()) or (len(content_length) > 1 and content_length[0] == "0"):
                 raise ValueError(f"invalid Content-Length: {content_length!r}")
+
             n = int(content_length)
+
             if max_body_size is not None and n > max_body_size:
                 raise ValueError(f"Content-Length exceeds max_body_size: {n}")
+
             body = rest[:n] if n > 0 else None
 
         method = method_b.decode("ascii")
         if method not in ("GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"):
             raise ValueError(f"unknown HTTP method: {method!r}")
 
-        return Request(client=client, scheme=scheme, secure=secure, protocol="HTTP/1.1", method=method, target=target_b.decode("latin-1"), headers=headers, body=body, h2=None, h3=None, tls=tls)
+        target = target_b.decode("latin-1")
+        if "\x00" in target or "\r" in target or "\n" in target:
+            raise ValueError("invalid character in request target")
+
+        return Request(client=client, scheme=scheme, secure=secure, protocol="HTTP/1.1", method=method, target=target, headers=headers, body=body, h2=None, h3=None, tls=tls)
 
     @staticmethod
     def build_response(response: Response) -> bytes | tuple[bytes, os.PathLike | None]:
@@ -102,8 +117,9 @@ class H1:
 
     @staticmethod
     def build_request(request: Request) -> bytes:
-        if request.body:
+        if request.body is not None:
             return H1.build_request_head(request) + request.body
+
         return H1.build_request_head(request)
 
     @staticmethod
@@ -145,9 +161,15 @@ class H1:
         for line in lines[1:]:
             if not line:
                 continue
+
+            if line[:1] in (b" ", b"\t"):
+                raise ValueError("obs-fold (header field continuation) is not permitted")
+
             name_b, sep_b, value_b = line.partition(b":")
+
             if not sep_b:
                 raise ValueError(f"malformed HTTP/1.1 header: {line!r}")
+
             headers.append(name_b.decode("latin-1").strip(), value_b.decode("latin-1").strip())
 
         return status, phrase, headers
@@ -175,7 +197,7 @@ class H1:
                 body = H1.decode_chunked(rest, max_body_size=max_body_size)
 
             elif content_length is not None:
-                if isinstance(content_length, list) or not (content_length.isascii() and content_length.isdigit()):
+                if isinstance(content_length, list) or not (content_length.isascii() and content_length.isdigit()) or (len(content_length) > 1 and content_length[0] == "0"):
                     raise ValueError(f"invalid Content-Length: {content_length!r}")
 
                 n = int(content_length)
@@ -448,7 +470,7 @@ class H1Connection:
                 consumed = body_start + scan[1]
 
             elif content_length_raw is not None:
-                if not (content_length_raw.isascii() and content_length_raw.isdigit()):
+                if not (content_length_raw.isascii() and content_length_raw.isdigit()) or (len(content_length_raw) > 1 and content_length_raw[0] == ord("0")):
                     self.send_error(400, "Bad Request")
                     self.transport.close()
                     return
@@ -870,7 +892,7 @@ class H1Connection:
         self.headers = None
         self.state = "head"
 
-        if request.body:
+        if request.body is not None:
             request.headers.set("Content-Length", str(len(request.body)), override=True)
 
         elif request.method in ("POST", "PUT", "PATCH", "DELETE"):

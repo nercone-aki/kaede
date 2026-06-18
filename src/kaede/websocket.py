@@ -224,9 +224,13 @@ class WebSocket:
         self.fragment_opcode: Opcode | None = None
         self.fragment_rsv1: bool = False
 
+    DEFLATE_HARD_LIMIT = 64 * 1024 * 1024
+
     def decompress(self, payload: bytes, rsv1: bool) -> bytes:
         if rsv1 and self.deflate is not None:
-            return self.deflate.decompress(payload, self.max_message_size)
+            limit = self.max_message_size if self.max_message_size is not None else self.DEFLATE_HARD_LIMIT
+            return self.deflate.decompress(payload, limit)
+
         return payload
 
     def write(self, data: bytes):
@@ -264,7 +268,16 @@ class WebSocket:
         if frame.opcode == Opcode.CLOSE:
             if not self.closed:
                 self.closed = True
-                echo = frame.payload[:2] if len(frame.payload) >= 2 else b""
+
+                if len(frame.payload) >= 2:
+                    code = struct.unpack(">H", frame.payload[:2])[0]
+                    if 1000 <= code <= 1003 or 1007 <= code <= 1011 or 3000 <= code <= 4999:
+                        echo = frame.payload[:2]
+                    else:
+                        echo = b""
+                else:
+                    echo = b""
+
                 self.write(build_frame(Opcode.CLOSE, echo, mask=self.mask_frames))
 
             try:
@@ -296,6 +309,10 @@ class WebSocket:
 
         elif frame.opcode == Opcode.CONTINUATION:
             if self.fragment_opcode is None:
+                self.close_transport(1002)
+                return
+
+            if frame.rsv1:
                 self.close_transport(1002)
                 return
 

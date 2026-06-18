@@ -137,6 +137,7 @@ class QUICConnection:
         self.remote_cid_set = not is_client
         self.path_response_pending: bytes | None = None
         self.needs_advance = True
+        self.buffered_packets: list[bytes] = []
 
     @classmethod
     def create_client(cls, tls_factory, server_name: str, local_tp_extra: dict | None = None) -> "QUICConnection":
@@ -313,7 +314,7 @@ class QUICConnection:
             self.run_handshake()
 
     def drain_buffered(self, now: float):
-        buffered = getattr(self, "buffered_packets", None)
+        buffered = self.buffered_packets
         if not buffered:
             return
 
@@ -347,8 +348,6 @@ class QUICConnection:
 
         keys = self.recv_keys.get(level)
         if keys is None:
-            if not hasattr(self, "buffered_packets"):
-                self.buffered_packets = []
             if len(self.buffered_packets) < 16:
                 self.buffered_packets.append(bytes(data[offset:packet_end]))
             return packet_end - offset
@@ -367,6 +366,11 @@ class QUICConnection:
 
         if keys is None:
             return 0
+
+        dcid_start = offset + 1
+        dcid_end = dcid_start + len(self.local_cid)
+        if len(data) < dcid_end or data[dcid_start:dcid_end] != self.local_cid:
+            return len(data) - offset
 
         pn_offset = offset + 1 + len(self.local_cid)
         plaintext, pn = self.decrypt(data, offset, pn_offset, keys, level, long_header=False, packet_end=len(data))
@@ -487,6 +491,10 @@ class QUICConnection:
                     self.max_uni_streams = max(self.max_uni_streams or 0, f.maximum)
 
             elif ftype is frames.HandshakeDone:
+                if level != LEVEL_APPLICATION:
+                    self.close(0x0a, "HANDSHAKE_DONE received at wrong encryption level")
+                    return
+
                 self.handshake_confirmed = True
                 self.send_keys.pop(LEVEL_INITIAL, None)
                 self.recv_keys.pop(LEVEL_INITIAL, None)
@@ -612,6 +620,11 @@ class QUICConnection:
             budget = max_len - len(payload) - 64
 
         if level == LEVEL_APPLICATION and self.close_pending is None:
+            if self.path_response_pending is not None:
+                payload += frames.PathResponse(self.path_response_pending).encode()
+                self.path_response_pending = None
+                ack_eliciting = True
+
             if self.handshake_done_pending:
                 payload += frames.HandshakeDone().encode()
                 self.handshake_done_pending = False

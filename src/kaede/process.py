@@ -125,7 +125,9 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
             await response.minify(html=config.minify_html, css=config.minify_css, js=config.minify_js, svg=config.minify_svg, keep_html_comments=config.minify_keep_html_comments)
 
             range_header = request.headers.get("Range", "")
-            if (range_header and request.method in ("GET", "HEAD") and response.status_code == 200):
+            range_is_multi = range_header.startswith("bytes=") and "," in range_header[6:]
+
+            if (range_header and not range_is_multi and request.method in ("GET", "HEAD") and response.status_code == 200):
                 total = len(response.body)
                 parsed = parse_range(range_header, total)
 
@@ -173,7 +175,9 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
             response.headers.set("Content-Type", response.content_type or response.headers.get("Content-Type") or mime or "application/octet-stream")
 
             range_header = request.headers.get("Range", "")
-            if (range_header and request.method in ("GET", "HEAD") and response.status_code == 200):
+            range_is_multi = range_header.startswith("bytes=") and "," in range_header[6:]
+
+            if (range_header and not range_is_multi and request.method in ("GET", "HEAD") and response.status_code == 200):
                 parsed = parse_range(range_header, total)
                 if parsed is None:
                     response.status_code = 416

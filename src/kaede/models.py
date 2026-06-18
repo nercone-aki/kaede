@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import gzip
 import zlib
+import base64
 import socket
 import asyncio
 import rjsmin
@@ -54,7 +55,12 @@ class Request:
         websocket_key     = (self.headers.get("Sec-WebSocket-Key") or "").strip()
         websocket_version = (self.headers.get("Sec-WebSocket-Version") or "").strip()
 
-        return upgrade == "websocket" and "upgrade" in connection and bool(websocket_key) and websocket_version == "13"
+        try:
+            key_valid = len(base64.b64decode(websocket_key, validate=True)) == 16
+        except Exception:
+            key_valid = False
+
+        return upgrade == "websocket" and "upgrade" in connection and key_valid and websocket_version == "13"
 
     async def compress(self, encoding: str = "zstd"):
         if not (self.body is not None and self.compression):
@@ -304,14 +310,13 @@ class Response:
             try:
                 path_str = os.fspath(self.body)
 
-                if await loop.run_in_executor(None, os.path.getsize, path_str) > max_compressible_file_size:
-                    return
-
                 def read_file():
                     with open(path_str, "rb") as f:
-                        return f.read()
+                        return f.read(max_compressible_file_size + 1)
 
                 data = await loop.run_in_executor(None, read_file)
+                if len(data) > max_compressible_file_size:
+                    return
 
                 if encoding == "zstd":
                     compressed = zstandard.ZstdCompressor(level=3).compress(data)
@@ -568,6 +573,13 @@ class Headers:
 
     def append_vary(self, header: str):
         vary = [v.strip() for v in self.get("Vary", "").split(",") if v.strip()]
+
+        if "*" in vary:
+            return
+
+        if header == "*":
+            self.set("Vary", "*")
+            return
 
         if not any(v.lower() == header.lower() for v in vary):
             vary.append(header)

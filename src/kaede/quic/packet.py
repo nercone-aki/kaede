@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import struct
 
 from .crypto import LEVEL_INITIAL, LEVEL_EARLY, LEVEL_HANDSHAKE
@@ -213,6 +214,17 @@ def serialize_long_header_prefix(packet_type: int, version: int, dcid: bytes, sc
     buf.push_uint_var(pn_length + payload_length)
 
     return buf.data, first
+
+def build_version_negotiation(client_dcid: bytes, client_scid: bytes) -> bytes:
+    buf = Buffer()
+    buf.push_uint8(0x80 | (os.urandom(1)[0] & 0x7F))
+    buf.push_uint32(0)
+    buf.push_uint8(len(client_scid))
+    buf.push_bytes(client_scid)
+    buf.push_uint8(len(client_dcid))
+    buf.push_bytes(client_dcid)
+    buf.push_uint32(QUIC_VERSION_1)
+    return buf.data
 
 def serialize_short_header_prefix(dcid: bytes, pn_length: int, *, spin: bool = False, key_phase: bool = False) -> tuple[bytes, int]:
     buf = Buffer()

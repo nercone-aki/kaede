@@ -10,7 +10,7 @@ from ..models import Request, Response, Headers
 from ..process import process_request
 from ..quic import QUICConnection, HandshakeCompleted, StreamDataReceived, ConnectionTerminated
 from ..quic.tls import QuicTLS, QuicTLSServerContext
-from ..quic.packet import Buffer, encode_uint_var
+from ..quic.packet import Buffer, encode_uint_var, build_version_negotiation, parse_long_header
 from ..quic.stream import stream_is_bidirectional
 from ..handler.common import StreamState, consume_response
 
@@ -95,7 +95,7 @@ class H3:
             (b":method", request.method.encode("ascii")),
             (b":scheme", request.scheme.encode("ascii")),
             (b":authority", authority.encode("ascii")),
-            (b":path", request.target.encode("latin-1")),
+            (b":path", request.target.encode("utf-8"))
         ]
         for name, value in request.headers.items():
             lname = name.lower()
@@ -211,7 +211,7 @@ class H3Connection:
             buf.extend(data)
 
         if len(buf) > 65536:
-            buf.clear()
+            del self.uni_buffers[sid]
 
     def feed_request_stream(self, sid: int, data: bytes, end_stream: bool, out: list):
         buf = self.request_buffers.setdefault(sid, bytearray())
@@ -245,6 +245,7 @@ class H3Connection:
                 try:
                     headers = qpack.decode_headers(payload)
                 except qpack.QpackError:
+                    self.quic.close(0x0200, "QPACK decompression failed")
                     return
                 out.append(HeadersReceived(sid, headers, stream_ended=False))
             elif frame_type == FRAME_DATA:
@@ -327,16 +328,25 @@ class H3Connection:
 
     def dispatch(self, stream_id: int, asm: RequestAssembler):
         self.assemblers.pop(stream_id, None)
+
         if asm.headers is None:
             return
+
         if asm.too_large:
             self.send_headers(stream_id, [(b":status", b"413")], end_stream=True)
             self.flush()
             return
+
         request = self.build_request(stream_id, asm)
+
+        if request is None:
+            self.send_headers(stream_id, [(b":status", b"405")], end_stream=True)
+            self.flush()
+            return
+
         self.handler.create_task(self.respond(request))
 
-    def build_request(self, stream_id: int, asm: RequestAssembler) -> Request:
+    def build_request(self, stream_id: int, asm: RequestAssembler) -> Request | None:
         method = "GET"
         target = "/"
         authority = ""
@@ -362,6 +372,9 @@ class H3Connection:
 
             elif not name.startswith(":"):
                 headers.append(name, value)
+
+        if method not in ("GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"):
+            return None
 
         body = bytes(asm.body) if asm.body else None
 
@@ -553,7 +566,21 @@ class H3Protocol(asyncio.DatagramProtocol):
 
         conn = self.connections.get(addr)
         if conn is None:
-            if (len(data) < 1200 or (data[0] & 0xF0) != 0xC0 or data[1:5] != b"\x00\x00\x00\x01"):
+            if len(data) < 1200 or not (data[0] & 0x80):
+                return
+
+            if data[1:5] != b"\x00\x00\x00\x01":
+                try:
+                    hdr = parse_long_header(data, 0)
+                    vn = build_version_negotiation(hdr.destination_cid, hdr.source_cid)
+
+                    if self.transport is not None:
+                        self.transport.sendto(vn, addr)
+                except Exception:
+                    pass
+                return
+
+            if (data[0] & 0xF0) != 0xC0:
                 return
 
             if len(self.connections) >= self.max_connections:

@@ -234,6 +234,13 @@ class H2Connection:
                     elif not name.startswith(":"):
                         stream.headers.append(name, value)
 
+                if stream.method not in ("GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"):
+                    try:
+                        self.connection.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR)
+                    except Exception:
+                        pass
+                    continue
+
                 if stream.method == "CONNECT" and websocket_protocol == "websocket":
                     queue: asyncio.Queue[bytes | None] = asyncio.Queue()
                     self.websocket_streams[event.stream_id] = queue
@@ -267,7 +274,7 @@ class H2Connection:
                         self.request_streams.pop(event.stream_id, None)
 
                         try:
-                            self.connection.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.ENHANCE_YOUR_CALM)
+                            self.connection.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.CANCEL)
                         except Exception:
                             pass
 
