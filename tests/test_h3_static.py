@@ -1,4 +1,3 @@
-import pytest
 from kaede.http.h3 import H3, H3_FORBIDDEN_HEADERS
 from kaede.models import Request, Response, Headers
 

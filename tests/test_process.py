@@ -1,6 +1,6 @@
 import pytest
 
-from kaede.models import Request, Response
+from kaede.models import Request
 from kaede.process import parse_accept_encoding, parse_range, error_response
 
 class TestParseAcceptEncoding:

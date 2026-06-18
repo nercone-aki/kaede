@@ -1,12 +1,10 @@
 import socket
 import struct
-import pytest
 
 from kaede.models import Listener, Callback, Request, Response
 from kaede.http.h2 import H2Info, H2WSUpgrade
 from kaede.http.h3 import H3Info, H3WSUpgrade
 from kaede.websocket import WebSocket, Opcode, parse_frames, build_frame
-
 
 class MockTransport:
     def __init__(self):
@@ -18,7 +16,6 @@ class MockTransport:
 
     def close(self):
         self.closed_called = True
-
 
 class TestListener:
     def test_kind_http(self):
@@ -60,7 +57,6 @@ class TestListener:
             assert listener.sock is sock
         finally:
             sock.close()
-
 
 class TestCallback:
     def test_websocket_subprotocols_default_empty(self):
@@ -117,7 +113,6 @@ class TestCallback:
         sentinel = ws.queue.get_nowait()
         assert sentinel is None
 
-
 class TestH2Info:
     def test_connection_id_field(self):
         info = H2Info(connection_id=b"\x01\x02\x03\x04", stream_id=1)
@@ -137,7 +132,6 @@ class TestH2Info:
         info = H2Info(connection_id=b"", stream_id=0)
         assert info.stream_id == 0
 
-
 class TestH2WSUpgrade:
     def test_stream_id_field(self):
         req = Request(method="GET", target="/ws")
@@ -155,7 +149,6 @@ class TestH2WSUpgrade:
             upgrade = H2WSUpgrade(stream_id=sid, request=req)
             assert upgrade.stream_id == sid
 
-
 class TestH3Info:
     def test_connection_id_field(self):
         info = H3Info(connection_id=b"\xAB\xCD", stream_id=1)
@@ -168,7 +161,6 @@ class TestH3Info:
     def test_empty_connection_id(self):
         info = H3Info(connection_id=b"", stream_id=0)
         assert info.connection_id == b""
-
 
 class TestH3WSUpgrade:
     def test_stream_id_field(self):

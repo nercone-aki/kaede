@@ -2,17 +2,9 @@ import asyncio
 import ipaddress
 import pytest
 
-from kaede.handler.common import (
-    parse_peername,
-    negotiate_websocket,
-    StreamState,
-    dispatch_event,
-    consume_response,
-    MAX_RESPONSE_HEADER_SIZE,
-)
+from kaede.handler.common import parse_peername, negotiate_websocket, StreamState, dispatch_event, consume_response
 from kaede.models import Request, Response, Headers
 from kaede.websocket import PerMessageDeflate
-
 
 class MockTransport:
     def __init__(self, peername=None):
@@ -22,7 +14,6 @@ class MockTransport:
         if key == "peername":
             return self._peername
         return default
-
 
 class TestParsePeername:
     def test_ipv4(self):
@@ -54,7 +45,6 @@ class TestParsePeername:
         addr, port = parse_peername(transport)
         assert addr == ipaddress.IPv4Address("0.0.0.0")
         assert port == 80
-
 
 class TestNegotiateWebSocket:
     def _make_request(self, **header_kv):
@@ -102,7 +92,6 @@ class TestNegotiateWebSocket:
         req = self._make_request(**{"Sec-WebSocket-Protocol": "chat"})
         subprotocol, _ = negotiate_websocket(req, [])
         assert subprotocol is None
-
 
 class TestStreamState:
     def _state(self, max_body_size=None):
@@ -181,7 +170,6 @@ class TestStreamState:
         state.push(b"y" * 11)  # 10+11=21 bytes, exceeds limit
         assert state.failed is not None
 
-
 class TestDispatchEvent:
     def _state(self):
         loop = asyncio.get_running_loop()
@@ -235,7 +223,6 @@ class TestDispatchEvent:
         dispatch_event(streams, ("response", 5, 201, h))
         _, headers = state.header_future.result()
         assert headers.get("x-test") == "val"
-
 
 class TestConsumeResponse:
     def _state_with_response(self, chunks, status=200, max_body_size=None):

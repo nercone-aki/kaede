@@ -1,7 +1,6 @@
 import pytest
 from kaede.huffman import huffman_encode, huffman_decode
 
-
 class TestHuffmanRoundtrip:
     def test_empty(self):
         assert huffman_decode(huffman_encode(b"")) == b""
@@ -35,7 +34,6 @@ class TestHuffmanRoundtrip:
         data = bytes(range(128, 256))
         assert huffman_decode(huffman_encode(data)) == data
 
-
 class TestHuffmanEncode:
     def test_empty_returns_empty(self):
         assert huffman_encode(b"") == b""
@@ -57,7 +55,6 @@ class TestHuffmanEncode:
         result = huffman_encode(b"test string")
         assert isinstance(result, bytes)
         assert len(result) > 0
-
 
 class TestHuffmanDecode:
     def test_empty_returns_empty(self):

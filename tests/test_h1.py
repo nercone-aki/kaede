@@ -1,7 +1,7 @@
 import ipaddress
 import pytest
 from kaede.http.h1 import H1
-from kaede.models import Request, Response, Headers
+from kaede.models import Request, Response
 
 CLIENT = (ipaddress.IPv4Address("127.0.0.1"), 12345)
 

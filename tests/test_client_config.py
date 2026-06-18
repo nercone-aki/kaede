@@ -1,7 +1,6 @@
 import pytest
 from kaede.api.client import Config, Handler, split_url, build_request
 
-
 class TestSplitURL:
     def test_basic_http(self):
         scheme, host, port, target, authority = split_url("http://example.com/")
@@ -80,7 +79,6 @@ class TestSplitURL:
     def test_uppercase_scheme_normalized(self):
         scheme, _, _, _, _ = split_url("HTTP://example.com/")
         assert scheme == "http"
-
 
 class TestBuildRequest:
     def _config(self, **kwargs):
@@ -178,7 +176,6 @@ class TestBuildRequest:
         request, _, _, _ = build_request("GET", "http://example.com/api/data?key=val", config, None, None)
         assert request.target == "/api/data?key=val"
 
-
 class TestClientConfig:
     def test_default_decompress(self):
         assert Config().decompress is True
@@ -221,7 +218,6 @@ class TestClientConfig:
 
     def test_user_agent_contains_kaede(self):
         assert "Kaede" in Config().user_agent
-
 
 class TestHandlerOrderedKinds:
     def _handler(self, protocols):
@@ -276,7 +272,6 @@ class TestHandlerOrderedKinds:
         tls_idx = kinds.index("tls")
         h3_idx = kinds.index("h3")
         assert tls_idx < h3_idx
-
 
 class TestHandlerConnectionCount:
     def _handler(self):

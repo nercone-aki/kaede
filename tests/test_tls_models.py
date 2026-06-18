@@ -1,16 +1,5 @@
 import ssl
-import pytest
-from kaede.tls.models import (
-    TLSInfo,
-    TLSServerConfig,
-    TLSClientConfig,
-    Group,
-    Cipher,
-    VERSION_MAP,
-    GROUP_MAP,
-    CIPHER_MAP,
-)
-
+from kaede.tls.models import TLSInfo, TLSServerConfig, TLSClientConfig, Group, Cipher, VERSION_MAP, GROUP_MAP, CIPHER_MAP
 
 class TestTLSInfo:
     def test_version_field(self):
@@ -38,7 +27,6 @@ class TestTLSInfo:
     def test_group_prime256v1(self):
         info = TLSInfo(version=None, group=Group.prime256v1, cipher=None)
         assert info.group == Group.prime256v1
-
 
 class TestTLSServerConfig:
     def test_certfile_default_none(self):
@@ -84,7 +72,6 @@ class TestTLSServerConfig:
         ciphers = [Cipher.TLS_AES_256_GCM_SHA384]
         cfg = TLSServerConfig(ciphers=ciphers)
         assert cfg.ciphers == ciphers
-
 
 class TestTLSClientConfig:
     def test_verify_default_true(self):
@@ -132,7 +119,6 @@ class TestTLSClientConfig:
         cfg = TLSClientConfig(cafile="/etc/ssl/ca.pem")
         assert cfg.cafile == "/etc/ssl/ca.pem"
 
-
 class TestGroupEnum:
     def test_x25519_value(self):
         assert Group.X25519.value == "x25519"
@@ -155,7 +141,6 @@ class TestGroupEnum:
     def test_mlkem768_value(self):
         assert Group.MLKEM768.value == "MLKEM768"
 
-
 class TestCipherEnum:
     def test_tls13_aes128_value(self):
         assert Cipher.TLS_AES_128_GCM_SHA256.value == "TLS_AES_128_GCM_SHA256"
@@ -171,7 +156,6 @@ class TestCipherEnum:
 
     def test_ecdhe_ecdsa_aes256(self):
         assert Cipher.ECDHE_ECDSA_AES256_GCM_SHA384.value == "ECDHE-ECDSA-AES256-GCM-SHA384"
-
 
 class TestVersionMap:
     def test_contains_tls13(self):
@@ -191,7 +175,6 @@ class TestVersionMap:
 
     def test_tlsv13_maps_to_tls13(self):
         assert VERSION_MAP.get("TLSv1.3") == "TLSv1.3"
-
 
 class TestGroupMap:
     def test_x25519_lookup(self):
@@ -220,7 +203,6 @@ class TestGroupMap:
 
     def test_unknown_key_returns_none(self):
         assert GROUP_MAP.get("unknown-group") is None
-
 
 class TestCipherMap:
     def test_aes128_gcm_lookup(self):

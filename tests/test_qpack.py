@@ -1,11 +1,5 @@
 import pytest
-from kaede.http.qpack import (
-    encode_integer, decode_integer,
-    encode_string, decode_string,
-    encode_headers, decode_headers,
-    QpackError, STATIC_TABLE,
-)
-
+from kaede.http.qpack import encode_integer, decode_integer, encode_string, decode_string, encode_headers, decode_headers, QpackError, STATIC_TABLE
 
 class TestEncodeDecodeInteger:
     def test_small_value_no_flags(self):
@@ -57,7 +51,6 @@ class TestEncodeDecodeInteger:
         value, _ = decode_integer(b"\x00", 0, 8)
         assert value == 0
 
-
 class TestEncodeDecodeString:
     def test_plain_string_roundtrip(self):
         data = b"content-type"
@@ -81,7 +74,6 @@ class TestEncodeDecodeString:
         encoded = encode_string(b"hello", 7, 0)
         assert encoded[0] == 5  # length=5, no huffman bit (bit 7 not set)
         assert encoded[1:] == b"hello"
-
 
 class TestEncodeDecodeHeaders:
     def test_empty_headers(self):

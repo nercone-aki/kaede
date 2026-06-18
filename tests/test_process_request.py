@@ -1,6 +1,4 @@
 import gzip
-import zlib
-import pytest
 import zstandard
 import brotlicffi
 
@@ -8,7 +6,6 @@ from kaede.models import Request, Response, Callback, Headers
 from kaede.process import process_request, process_response
 from kaede.api.server import Config as ServerConfig
 from kaede.api.client import Config as ClientConfig
-
 
 def _server_config(**kwargs):
     return ServerConfig(**kwargs)
@@ -20,7 +17,6 @@ def _make_request(method="GET", target="/", protocol="HTTP/1.1", **header_kv):
         r.headers.set(k.replace("_", "-"), v)
     return r
 
-
 class _CB(Callback):
     def __init__(self, response_factory):
         super().__init__()
@@ -28,7 +24,6 @@ class _CB(Callback):
 
     async def on_request(self, request):
         return self._factory(request)
-
 
 class TestProcessRequest:
     async def test_date_header_set(self):
@@ -232,7 +227,6 @@ class TestProcessRequest:
         cb = _CB(lambda r: Response(b"", status_code=204, compression=False))
         resp = await process_request(req, cb, config)
         assert resp.status_code == 204
-
 
 class TestProcessResponse:
     async def test_no_decompress_config_returns_unchanged(self):

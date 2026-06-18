@@ -89,7 +89,7 @@ class Request:
         encoding = encoding.strip().lower() if encoding is not None else self.headers.get("Content-Encoding", "").strip().lower()
 
         if encoding == "zstd":
-            self.body = zstandard.ZstdDecompressor().decompress(self.compressed)
+            self.body = zstandard.ZstdDecompressor().decompressobj().decompress(self.compressed)
         elif encoding == "br":
             self.body = brotlicffi.decompress(self.compressed)
         elif encoding in ("gzip", "x-gzip"):
@@ -340,7 +340,7 @@ class Response:
 
         else:
             if encoding == "zstd":
-                self.body = zstandard.ZstdDecompressor().decompress(self.compressed)
+                self.body = zstandard.ZstdDecompressor().decompressobj().decompress(self.compressed)
             elif encoding == "br":
                 self.body = brotlicffi.decompress(self.compressed)
             elif encoding in ("gzip", "x-gzip"):

@@ -1,7 +1,5 @@
-import pytest
 from kaede.http.h2 import H2, H2_FORBIDDEN_HEADERS
 from kaede.models import Request, Response, Headers
-
 
 def make_response(status=200, body=b"", **header_kv):
     r = Response(body=body, status_code=status)
@@ -9,13 +7,11 @@ def make_response(status=200, body=b"", **header_kv):
         r.headers.set(k.replace("_", "-"), v)
     return r
 
-
 def make_request(method="GET", target="/", scheme="https", **header_kv):
     h = Headers({})
     for k, v in header_kv.items():
         h.set(k.replace("_", "-"), v)
     return Request(method=method, target=target, scheme=scheme, headers=h)
-
 
 class TestBuildResponseHeaders:
     def test_status_is_first_pseudo_header(self):
@@ -110,7 +106,6 @@ class TestBuildResponseHeaders:
         assert "cache-control" in names
         assert "x-request-id" in names
 
-
 class TestBuildRequestHeaders:
     def test_method_pseudo_header(self):
         req = make_request(method="POST")
@@ -180,7 +175,6 @@ class TestBuildRequestHeaders:
             last_pseudo_idx = max(i for i, (n, _) in enumerate(headers) if n.startswith(":"))
             first_non_pseudo_idx = min(i for i, (n, _) in enumerate(headers) if not n.startswith(":"))
             assert last_pseudo_idx < first_non_pseudo_idx
-
 
 class TestBuildConnectWebSocketHeaders:
     def test_method_is_connect(self):

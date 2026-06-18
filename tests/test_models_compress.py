@@ -1,11 +1,9 @@
 import gzip
 import zlib
-import pytest
 import zstandard
 import brotlicffi
 
-from kaede.models import Request, Response, Headers
-
+from kaede.models import Request, Response
 
 def _make_request(body=None, compression=True, **kwargs):
     r = Request(method="GET", target="/", body=body, compression=compression)
@@ -13,13 +11,11 @@ def _make_request(body=None, compression=True, **kwargs):
         r.headers.set(k.replace("_", "-"), v)
     return r
 
-
 def _make_response(body=None, compression=True, content_type=None, **kwargs):
     r = Response(body=body, compression=compression, content_type=content_type)
     for k, v in kwargs.items():
         r.headers.set(k.replace("_", "-"), v)
     return r
-
 
 class TestRequestCompress:
     async def test_zstd_compress(self):
@@ -190,6 +186,15 @@ class TestRequestDecompress:
         r.decompress()
         assert r.body == original
 
+    def test_zstd_streaming_compressor_decompress(self):
+        original = b"hello world " * 100
+        cobj = zstandard.ZstdCompressor().compressobj()
+        compressed = cobj.compress(original) + cobj.flush()
+        r = _make_request()
+        r.body = None
+        r.compressed = compressed
+        r.decompress("zstd")
+        assert r.body == original
 
 class TestResponseCompress:
     async def test_zstd_wins_when_all_equal_q(self):
@@ -358,6 +363,17 @@ class TestResponseDecompress:
         r.compression = True
         r.headers.set("Content-Encoding", "gzip")
         r.decompress()
+        assert r.body == original
+
+    def test_zstd_streaming_compressor_decompress(self):
+        original = b"hello world " * 100
+        cobj = zstandard.ZstdCompressor().compressobj()
+        compressed = cobj.compress(original) + cobj.flush()
+        r = _make_response()
+        r.body = None
+        r.compressed = compressed
+        r.compression = True
+        r.decompress("zstd")
         assert r.body == original
 
     async def test_streaming_zstd_decompress(self):

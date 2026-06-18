@@ -2,10 +2,8 @@ import pytest
 from kaede.api.server import Config, Server
 from kaede.models import Callback
 
-
 def _server(config=None):
     return Server(Callback(), config or Config())
-
 
 class TestServerConfig:
     def test_default_server_name(self):
@@ -63,7 +61,6 @@ class TestServerConfig:
         assert cfg.minify_html is True
         assert cfg.minify_css is True
 
-
 class TestParseHostPort:
     def test_ipv4_host_and_port(self):
         s = _server()
@@ -115,14 +112,12 @@ class TestParseHostPort:
         _, port = s.parse_host_port("127.0.0.1:1234")
         assert isinstance(port, int)
 
-
 class TestServerListeners:
     def test_parse_host_port_consistency(self):
         s = _server(Config(bind_http=["127.0.0.1:18080"], bind_https=[]))
         host, port = s.parse_host_port("127.0.0.1:18080")
         assert host == "127.0.0.1"
         assert port == 18080
-
 
 class TestServerConfigExtra:
     def test_default_shutdown_timeout(self):
@@ -170,7 +165,6 @@ class TestServerConfigExtra:
 
     def test_custom_max_pipeline_buffer_len(self):
         assert Config(max_pipeline_buffer_len=50).max_pipeline_buffer_len == 50
-
 
 class TestServerParseHostPortEdgeCases:
     def test_port_zero(self):
