@@ -110,6 +110,9 @@ class TestCallback:
         transport = MockTransport()
         ws = WebSocket(transport, require_masking=False)
         await cb.on_websocket(req, ws)
+        buf = bytearray(build_frame(Opcode.CLOSE, b""))
+        for f in parse_frames(buf):
+            ws.feed_frame(f)
         sentinel = ws.queue.get_nowait()
         assert sentinel is None
 

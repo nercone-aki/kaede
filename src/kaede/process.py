@@ -175,7 +175,7 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
             response.headers.set("Content-Type", response.content_type or response.headers.get("Content-Type") or "application/octet-stream")
             response.headers.remove("Content-Length")
 
-            if request.protocol == "HTTP/1.1" and not (100 <= response.status_code < 200 or response.status_code in (204, 304)):
+            if request.protocol == "HTTP/1.1" and not (100 <= response.status_code < 200 or response.status_code in (204, 205, 304)):
                 response.headers.set("Transfer-Encoding", "chunked")
 
         elif response.body is not None:

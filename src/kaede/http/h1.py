@@ -259,7 +259,7 @@ class H1:
             if end == -1:
                 return None
 
-            size_line = data[i:end].split(b";", 1)[0].strip()
+            size_line = data[i:end].split(b";", 1)[0].rstrip(b" \t")
 
             try:
                 size = int(size_line, 16)
@@ -871,7 +871,7 @@ class H1Connection:
             if end == -1:
                 return False
 
-            line = bytes(self.buffer[:end]).split(b";", 1)[0].strip()
+            line = bytes(self.buffer[:end]).split(b";", 1)[0].rstrip(b" \t")
             del self.buffer[:end + 2]
 
             try:

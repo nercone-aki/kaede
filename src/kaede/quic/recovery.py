@@ -21,8 +21,6 @@ K_GRANULARITY = 0.001
 K_INITIAL_RTT = 0.333
 K_LOSS_REDUCTION_FACTOR = 0.5
 K_PERSISTENT_CONGESTION_THRESHOLD = 3
-INITIAL_WINDOW = 12000
-MINIMUM_WINDOW = 2 * 1200
 
 def level_to_space(level: int) -> int:
     return LEVEL_TO_SPACE[level]
@@ -57,10 +55,15 @@ class Recovery:
         self.pto_count = 0
         self.max_datagram_size = max_datagram_size
 
+        self.initial_window = min(10 * max_datagram_size, max(14720, 2 * max_datagram_size))
+        self.minimum_window = 2 * max_datagram_size
+
         self.bytes_in_flight = 0
-        self.congestion_window = INITIAL_WINDOW
+        self.congestion_window = self.initial_window
         self.ssthresh: int | None = None
         self.congestion_recovery_start_time = 0.0
+
+        self.peer_max_ack_delay = 0.025
 
     def on_packet_sent(self, packet: SentPacket):
         space = self.spaces[packet.space]
@@ -75,6 +78,9 @@ class Recovery:
     def on_ack_received(self, space_id: int, largest_acked: int, ack_delay: float, ack_ranges: list[tuple[int, int]], now: float, peer_max_ack_delay: float = 0.025) -> tuple[list[SentPacket], list[SentPacket]]:
         space = self.spaces[space_id]
         space.largest_acked = max(space.largest_acked or 0, largest_acked)
+
+        if space_id == SPACE_APPLICATION:
+            self.peer_max_ack_delay = peer_max_ack_delay
 
         newly_acked: list[SentPacket] = []
         for low, high in ack_ranges:
@@ -159,36 +165,58 @@ class Recovery:
         else:
             self.congestion_window += self.max_datagram_size * pkt.sent_bytes // max(self.congestion_window, 1)
 
+    def _check_persistent_congestion(self, lost: list[SentPacket]) -> bool:
+        if not self.have_rtt:
+            return False
+        ack_eliciting = sorted(
+            [p for p in lost if p.ack_eliciting],
+            key=lambda p: p.time_sent,
+        )
+        if len(ack_eliciting) < 2:
+            return False
+        span = ack_eliciting[-1].time_sent - ack_eliciting[0].time_sent
+        pc_duration = self.pto(self.peer_max_ack_delay) * K_PERSISTENT_CONGESTION_THRESHOLD
+        return span >= pc_duration
+
     def on_packets_lost(self, lost: list[SentPacket], now: float):
         last = max(p.time_sent for p in lost)
         if self.in_congestion_recovery(last):
             return
         self.congestion_recovery_start_time = now
-        self.ssthresh = max(int(self.congestion_window * K_LOSS_REDUCTION_FACTOR), MINIMUM_WINDOW)
+        self.ssthresh = max(int(self.congestion_window * K_LOSS_REDUCTION_FACTOR), self.minimum_window)
         self.congestion_window = self.ssthresh
+
+        if self._check_persistent_congestion(lost):
+            self.congestion_window = self.minimum_window
+            self.ssthresh = self.minimum_window
 
     def can_send(self, packet_size: int) -> bool:
         return self.bytes_in_flight + packet_size <= self.congestion_window
 
-    def pto(self) -> float:
+    def pto(self, max_ack_delay: float = 0.0) -> float:
         rtt = self.smoothed_rtt if self.have_rtt else K_INITIAL_RTT
         var = self.rtt_variance if self.have_rtt else K_INITIAL_RTT / 2
-        return rtt + max(4 * var, K_GRANULARITY)
+        return rtt + max(4 * var, K_GRANULARITY) + max_ack_delay
 
     def get_loss_time(self) -> float | None:
         times = [s.loss_time for s in self.spaces.values() if s.loss_time is not None]
         return min(times) if times else None
 
-    def get_timer(self) -> float | None:
+    def get_timer(self, peer_max_ack_delay: float = 0.025) -> float | None:
         loss_time = self.get_loss_time()
         if loss_time is not None:
             return loss_time
 
-        last_times = [s.time_of_last_ack_eliciting for s in self.spaces.values() if s.time_of_last_ack_eliciting is not None]
-        if not last_times or self.bytes_in_flight == 0:
-            return None
-        pto = self.pto() * (2 ** self.pto_count)
-        return max(last_times) + pto
+        best: float | None = None
+        for space_id, space in self.spaces.items():
+            if space.time_of_last_ack_eliciting is None:
+                continue
+            mad = peer_max_ack_delay if space_id == SPACE_APPLICATION else 0.0
+            pto = self.pto(mad) * (2 ** self.pto_count)
+            candidate = space.time_of_last_ack_eliciting + pto
+            if best is None or candidate < best:
+                best = candidate
+        return best
 
     def on_timeout(self, now: float) -> list[SentPacket]:
         loss_time = self.get_loss_time()

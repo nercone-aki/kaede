@@ -263,14 +263,14 @@ class H2Connection:
 
                 is_extended_connect = stream.method == "CONNECT" and websocket_protocol == "websocket"
                 if stream.method == "CONNECT" and not is_extended_connect:
-                    if not stream.authority:
+                    if not stream.authority or has_scheme or has_path:
                         try:
                             self.connection.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR)
                         except Exception:
                             pass
                         continue
 
-                elif not stream.method or not stream.target or stream.scheme not in ("http", "https"):
+                elif not stream.method or not stream.target or stream.scheme not in ("http", "https") or not has_scheme:
                     try:
                         self.connection.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR)
                     except Exception:

@@ -34,6 +34,8 @@ SETTINGS_MAX_FIELD_SECTION_SIZE = 0x06
 SETTINGS_QPACK_BLOCKED_STREAMS = 0x07
 SETTINGS_ENABLE_CONNECT_PROTOCOL = 0x08
 
+FORBIDDEN_H2_SETTINGS = frozenset([0x02, 0x03, 0x04, 0x05])
+
 @dataclass
 class H3Info:
     connection_id: bytes
@@ -71,7 +73,7 @@ class H3:
     def encode_settings() -> bytes:
         body = bytearray()
 
-        for ident, value in ((SETTINGS_QPACK_MAX_TABLE_CAPACITY, 0), (SETTINGS_QPACK_BLOCKED_STREAMS, 0)):
+        for ident, value in ((SETTINGS_QPACK_MAX_TABLE_CAPACITY, 0), (SETTINGS_QPACK_BLOCKED_STREAMS, 0), (SETTINGS_ENABLE_CONNECT_PROTOCOL, 1), (0x21, 0)):
             body += encode_uint_var(ident)
             body += encode_uint_var(value)
 
@@ -129,6 +131,12 @@ class H3Connection:
         self.uni_buffers: dict[int, bytearray] = {}
         self.request_buffers: dict[int, bytearray] = {}
         self.finished: set[int] = set()
+
+        # Peer control stream state (RFC 9114 §6.2.1)
+        self.peer_control_stream_id: int | None = None
+        self.peer_settings_received: bool = False
+        self.peer_max_field_section_size: int | None = None
+        self.peer_enable_connect: bool = False
 
         # server state
         self.client = peername(addr) if addr is not None else (ipaddress.IPv4Address("0.0.0.0"), 0)
@@ -208,16 +216,80 @@ class H3Connection:
             self.peer_uni_types[sid] = stream_type
             del buf[:reader.tell()]
 
+            if stream_type == STREAM_CONTROL:
+                self.peer_control_stream_id = sid
+
         else:
             buf.extend(data)
 
-        if len(buf) > 65536:
+        stream_type = self.peer_uni_types.get(sid)
+
+        if stream_type == STREAM_CONTROL:
+            self.parse_control_stream(sid, buf)
+        elif len(buf) > 65536:
             del self.uni_buffers[sid]
+
+    def parse_control_stream(self, sid: int, buf: bytearray):
+        while True:
+            reader = Buffer(bytes(buf))
+            try:
+                frame_type = reader.pull_uint_var()
+                length = reader.pull_uint_var()
+            except Exception:
+                break
+
+            header_len = reader.tell()
+            if len(buf) - header_len < length:
+                break
+
+            payload = bytes(buf[header_len:header_len + length])
+            del buf[:header_len + length]
+
+            if not self.peer_settings_received:
+                if frame_type != FRAME_SETTINGS:
+                    self.quic.close(0x010a, "H3_MISSING_SETTINGS")
+                    return
+
+                self.peer_settings_received = True
+                self.apply_peer_settings(payload)
+
+            elif frame_type == FRAME_SETTINGS:
+                self.quic.close(0x0105, "H3_FRAME_UNEXPECTED")
+                return
+
+    def apply_peer_settings(self, payload: bytes):
+        reader = Buffer(payload)
+        seen_ids: set[int] = set()
+        while not reader.eof():
+            try:
+                ident = reader.pull_uint_var()
+                value = reader.pull_uint_var()
+            except Exception:
+                self.quic.close(0x0109, "H3_SETTINGS_ERROR")
+                return
+
+            if ident in seen_ids:
+                self.quic.close(0x0109, "H3_SETTINGS_ERROR")
+                return
+            seen_ids.add(ident)
+
+            if ident in FORBIDDEN_H2_SETTINGS:
+                self.quic.close(0x0109, "H3_SETTINGS_ERROR")
+                return
+
+            if ident == SETTINGS_MAX_FIELD_SECTION_SIZE:
+                self.peer_max_field_section_size = value
+            elif ident == SETTINGS_ENABLE_CONNECT_PROTOCOL:
+                self.peer_enable_connect = (value == 1)
 
     def feed_request_stream(self, sid: int, data: bytes, end_stream: bool, out: list):
         buf = self.request_buffers.setdefault(sid, bytearray())
 
         if len(buf) + len(data) > self.max_body_size + (self.handler.config.max_header_size if self.handler else 65536):
+            asm = self.assemblers.get(sid)
+            if asm is not None:
+                self.send_headers(sid, [(b":status", b"413")], end_stream=True)
+                self.flush()
             self.request_buffers.pop(sid, None)
             self.assemblers.pop(sid, None)
             return
@@ -366,7 +438,7 @@ class H3Connection:
         request = self.build_request(stream_id, asm)
 
         if request is None:
-            self.send_headers(stream_id, [(b":status", b"405")], end_stream=True)
+            self.send_headers(stream_id, [(b":status", b"400")], end_stream=True)
             self.flush()
             return
 
@@ -378,6 +450,8 @@ class H3Connection:
         target: str | None = None
         authority = ""
         scheme: str | None = None
+        has_scheme = False
+        has_path = False
         headers = Headers({})
 
         for nameb, valueb in asm.headers:
@@ -389,9 +463,11 @@ class H3Connection:
 
             elif name == ":scheme":
                 scheme = value if value in ("http", "https") else "https"
+                has_scheme = True
 
             elif name == ":path":
                 target = value
+                has_path = True
 
             elif name == ":authority":
                 authority = value
@@ -404,10 +480,10 @@ class H3Connection:
             return None
 
         if method == "CONNECT":
-            if not authority:
+            if not authority or has_scheme or has_path:
                 return None
         else:
-            if not method or not target or scheme not in ("http", "https"):
+            if not method or not target or not has_scheme or scheme not in ("http", "https"):
                 return None
 
         body = bytes(asm.body) if asm.body else None

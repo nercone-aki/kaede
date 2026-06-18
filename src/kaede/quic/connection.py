@@ -104,8 +104,12 @@ class QUICConnection:
 
         self.bytes_received: int = 0
         self.bytes_sent_pre_validation: int = 0
+        self.data_sent: int = 0
 
         self.recovery = Recovery(MAX_DATAGRAM_SIZE)
+        self.data_blocked_pending: bool = False
+        self.streams_blocked_bidi: bool = False
+        self.streams_blocked_uni: bool = False
         self._events: list = []
 
         self.send_keys: dict[int, PacketKeys] = {}
@@ -204,12 +208,14 @@ class QUICConnection:
     def get_next_available_stream_id(self, is_bidi: bool = True) -> int:
         if is_bidi:
             if self.max_bidi_streams is not None and self.next_bidi // 4 >= self.max_bidi_streams:
+                self.streams_blocked_bidi = True
                 raise ConnectionError("peer bidirectional stream limit reached")
             sid = self.next_bidi
             self.next_bidi += 4
         else:
             base = 2 if self.is_client else 3
             if self.max_uni_streams is not None and (self.next_uni - base) // 4 >= self.max_uni_streams:
+                self.streams_blocked_uni = True
                 raise ConnectionError("peer unidirectional stream limit reached")
             sid = self.next_uni
             self.next_uni += 4
@@ -280,7 +286,7 @@ class QUICConnection:
             if self.is_client:
                 peer_odcid = self.peer_transport_params.get(TP_ORIGINAL_DCID)
                 if not isinstance(peer_odcid, bytes) or peer_odcid != self.original_dcid:
-                    self.close(0x10, "original_destination_connection_id mismatch", application=False)
+                    self.close(0x08, "original_destination_connection_id mismatch", application=False)
                     return
 
             self.peer_max_data = int(self.peer_transport_params.get(TP_INITIAL_MAX_DATA, DEFAULT_MAX_DATA) or 0)
@@ -504,12 +510,16 @@ class QUICConnection:
                     stream.reset_pending = (f.error_code, stream.sender.written)
 
             elif ftype is frames.MaxData:
+                if f.maximum > self.peer_max_data:
+                    self.data_blocked_pending = False
                 self.peer_max_data = max(self.peer_max_data, f.maximum)
 
             elif ftype is frames.MaxStreamData:
                 st = self.streams.get(f.stream_id)
 
                 if st is not None:
+                    if f.maximum > st.max_stream_data_remote:
+                        st.data_blocked_sent_at = None
                     st.max_stream_data_remote = max(st.max_stream_data_remote, f.maximum)
 
             elif ftype is frames.PathChallenge:
@@ -521,8 +531,12 @@ class QUICConnection:
 
             elif ftype is frames.MaxStreams:
                 if f.bidi:
+                    if f.maximum > (self.max_bidi_streams or 0):
+                        self.streams_blocked_bidi = False
                     self.max_bidi_streams = max(self.max_bidi_streams or 0, f.maximum)
                 else:
+                    if f.maximum > (self.max_uni_streams or 0):
+                        self.streams_blocked_uni = False
                     self.max_uni_streams = max(self.max_uni_streams or 0, f.maximum)
 
             elif ftype is frames.NewConnectionId:
@@ -725,6 +739,21 @@ class QUICConnection:
                 self.handshake_done_pending = False
                 ack_eliciting = True
 
+            if self.streams_blocked_bidi and max_len - len(payload) > 16:
+                payload += frames.StreamsBlocked(self.max_bidi_streams or 0, bidi=True).encode()
+                self.streams_blocked_bidi = False
+                ack_eliciting = True
+
+            if self.streams_blocked_uni and max_len - len(payload) > 16:
+                payload += frames.StreamsBlocked(self.max_uni_streams or 0, bidi=False).encode()
+                self.streams_blocked_uni = False
+                ack_eliciting = True
+
+            if self.data_blocked_pending and max_len - len(payload) > 16:
+                payload += frames.DataBlocked(self.peer_max_data).encode()
+                self.data_blocked_pending = False
+                ack_eliciting = True
+
             for stream in self.streams.values():
                 if stream.reset_pending is not None:
                     err, final = stream.reset_pending
@@ -742,15 +771,32 @@ class QUICConnection:
                     if avail_cwnd <= 0:
                         break
 
-                    frame = stream.sender.get_frame(min(budget, 1100, max(1, avail_cwnd)), max_offset)
+                    conn_remaining = self.peer_max_data - self.data_sent
+                    if conn_remaining <= 0:
+                        self.data_blocked_pending = True
+                        break
+
+                    frame = stream.sender.get_frame(
+                        min(budget, 1100, max(1, avail_cwnd), conn_remaining),
+                        max_offset,
+                    )
                     if frame is None:
                         break
 
                     off, sdata, fin = frame
                     payload += frames.Stream(stream.stream_id, off, sdata, fin).encode()
                     sent_frames.append(("stream", stream.stream_id, off, len(sdata), fin))
+                    self.data_sent += len(sdata)
                     ack_eliciting = True
                     budget = max_len - len(payload) - 32
+
+                if (budget > 16
+                        and stream.sender.has_data_to_send(1 << 62)
+                        and not stream.sender.has_data_to_send(max_offset)
+                        and stream.data_blocked_sent_at != max_offset):
+                    payload += frames.StreamDataBlocked(stream.stream_id, max_offset).encode()
+                    stream.data_blocked_sent_at = max_offset
+                    ack_eliciting = True
 
         if not payload:
             return None, False
@@ -803,7 +849,12 @@ class QUICConnection:
             buf[pn_offset + i] ^= mask[1 + i]
 
     def get_timer(self) -> float | None:
-        return self.recovery.get_timer()
+        peer_mad = (
+            int(self.peer_transport_params.get(TP_MAX_ACK_DELAY, 25) or 25) / 1000.0
+            if self.peer_transport_params
+            else 0.025
+        )
+        return self.recovery.get_timer(peer_mad)
 
     def handle_timer(self, now: float):
         probes = self.recovery.on_timeout(now)

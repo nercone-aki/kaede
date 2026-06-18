@@ -111,6 +111,15 @@ for _i, (_n, _v) in enumerate(STATIC_TABLE):
     STATIC_INDEX_BY_HEADER.setdefault((_n, _v), _i)
     STATIC_INDEX_BY_NAME.setdefault(_n, _i)
 
+SENSITIVE_HEADERS: frozenset[bytes] = frozenset([
+    b"authorization",
+    b"cookie",
+    b"set-cookie",
+    b"www-authenticate",
+    b"proxy-authenticate",
+    b"proxy-authorization"
+])
+
 class QpackError(Exception):
     pass
 
@@ -183,19 +192,24 @@ def encode_headers(headers: list[tuple[bytes, bytes]]) -> bytes:
 
     for name, value in headers:
         name = name.lower()
-        full = STATIC_INDEX_BY_HEADER.get((name, value))
+        sensitive = name in SENSITIVE_HEADERS
 
+        if sensitive:
+            name_idx = STATIC_INDEX_BY_NAME.get(name)
+            if name_idx is not None:
+                flag = 0x70 if sensitive else 0x50
+                out += encode_integer(name_idx, 4, flag)
+                out += encode_string(value, 7, 0)
+            else:
+                flag = 0x30 if sensitive else 0x20
+                out += encode_string(name, 3, flag)
+                out += encode_string(value, 7, 0)
+            continue
+
+        full = STATIC_INDEX_BY_HEADER.get((name, value))
         if full is not None:
             out += encode_integer(full, 6, 0xC0)
             continue
-
-        name_idx = STATIC_INDEX_BY_NAME.get(name)
-        if name_idx is not None:
-            out += encode_integer(name_idx, 4, 0x50)
-            out += encode_string(value, 7, 0)
-        else:
-            out += encode_string(name, 3, 0x20)
-            out += encode_string(value, 7, 0)
 
     return bytes(out)
 

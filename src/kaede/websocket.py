@@ -220,11 +220,17 @@ class WebSocket:
         self.max_message_size = max_message_size
         self.queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self.closed = False
+        self.queue_ended = False
         self.fragments: bytearray = bytearray()
         self.fragment_opcode: Opcode | None = None
         self.fragment_rsv1: bool = False
 
     DEFLATE_HARD_LIMIT = 64 * 1024 * 1024
+
+    def end_queue(self):
+        if not self.queue_ended:
+            self.queue_ended = True
+            self.queue.put_nowait(None)
 
     def decompress(self, payload: bytes, rsv1: bool) -> bytes:
         if rsv1 and self.deflate is not None:
@@ -288,7 +294,7 @@ class WebSocket:
             except Exception:
                 pass
 
-            self.queue.put_nowait(None)
+            self.end_queue()
             return
 
         if frame.opcode in (Opcode.TEXT, Opcode.BINARY):
@@ -365,7 +371,7 @@ class WebSocket:
             except Exception:
                 pass
 
-            self.queue.put_nowait(None)
+            self.end_queue()
 
     async def ping(self, payload: bytes = b""):
         if self.closed:
@@ -398,9 +404,9 @@ class WebSocket:
         self.closed = True
         payload = struct.pack(">H", code) + reason.encode("utf-8")
         self.write(build_frame(Opcode.CLOSE, payload, mask=self.mask_frames))
-        self.queue.put_nowait(None)
 
         def force_close():
+            self.end_queue()
             try:
                 self.transport.close()
             except Exception:
@@ -409,4 +415,4 @@ class WebSocket:
         try:
             asyncio.get_running_loop().call_later(5.0, force_close)
         except RuntimeError:
-            pass
+            self.end_queue()
