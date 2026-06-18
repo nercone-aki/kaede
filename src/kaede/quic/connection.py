@@ -217,6 +217,22 @@ class QUICConnection:
         self.retry_token: bytes = b""
         self.retry_source_cid: bytes | None = None
 
+        # Connection ID management (RFC 9000 §5.1). Sequence 0 is the CID used
+        # during the handshake. We issue additional CIDs so the peer has spares
+        # (for migration / privacy) and track the peer's CIDs.
+        self.local_active_cid_limit = 2
+        self.local_cid_seqs: set[int] = {0}
+        self.local_cid_info: dict[int, tuple[bytes, bytes]] = {}
+        self.next_cid_seq = 1
+        self.cids_issued = False
+        self.new_cids_pending: list[tuple[int, bytes, bytes]] = []
+        self.retire_cids_pending: list[int] = []
+        self.peer_cids: dict[int, bytes] = {}
+        self.remote_cid_seq = 0
+        self.peer_retire_prior_to = 0
+        if not is_client:
+            self.peer_cids[0] = remote_cid  # the client's initial Source CID
+
         self._tls_factory = None
 
     @classmethod
@@ -441,6 +457,7 @@ class QUICConnection:
                 self.handshake_done_pending = True
                 self.handshake_confirmed = True
 
+            self._issue_connection_ids()
             self._events.append(HandshakeCompleted(self.tls.alpn()))
 
     def receive_datagram(self, data: bytes, now: float):
@@ -510,6 +527,8 @@ class QUICConnection:
         if self.is_client and not self.remote_cid_set and hdr.source_cid:
             self.remote_cid = hdr.source_cid
             self.remote_cid_set = True
+            self.peer_cids[0] = hdr.source_cid
+            self.remote_cid_seq = 0
 
         if not self.is_client and level == LEVEL_INITIAL and not self.recv_keys.get(LEVEL_INITIAL):
             pass
@@ -760,18 +779,17 @@ class QUICConnection:
                     self.max_uni_streams = max(self.max_uni_streams or 0, f.maximum)
 
             elif ftype is frames.NewConnectionId:
-                if f.retire_prior_to > f.sequence_number:
-                    self.close(0x07, "NEW_CONNECTION_ID: retire_prior_to exceeds sequence_number", application=False)
+                self._on_new_connection_id(f)
+                if self.terminated:
                     return
-
-                if f.retire_prior_to > 0:
-                    self.remote_cid = f.connection_id
-                    self.remote_cid_set = True
 
             elif ftype is frames.RetireConnectionId:
-                if f.sequence_number > 0:
+                # The peer is retiring one of our CIDs (RFC 9000 §19.16).
+                if f.sequence_number >= self.next_cid_seq:
                     self.close(0x0a, "RETIRE_CONNECTION_ID references unissued sequence number", application=False)
                     return
+                self.local_cid_seqs.discard(f.sequence_number)
+                self.local_cid_info.pop(f.sequence_number, None)
 
             elif ftype is frames.Datagram:
                 if self.local_max_datagram_frame_size <= 0 or level != LEVEL_APPLICATION:
@@ -859,6 +877,52 @@ class QUICConnection:
             self.max_data_local = total_consumed + window
             self.max_data_pending = True
 
+    def _issue_connection_ids(self):
+        # RFC 9000 §5.1.1: provide the peer with spare connection IDs up to the
+        # active_connection_id_limit it advertised.
+        if self.cids_issued or not self.peer_transport_params:
+            return
+        limit = max(1, min(int(self.peer_transport_params.get(TP_ACTIVE_CONNECTION_ID_LIMIT, 2) or 2), 8))
+        while self.next_cid_seq < limit:
+            seq = self.next_cid_seq
+            cid = os.urandom(8)
+            token = os.urandom(16)
+            self.local_cid_seqs.add(seq)
+            self.local_cid_info[seq] = (cid, token)
+            self.new_cids_pending.append((seq, cid, token))
+            self.next_cid_seq += 1
+        self.cids_issued = True
+
+    def _on_new_connection_id(self, f: frames.NewConnectionId):
+        # RFC 9000 §19.15.
+        if f.retire_prior_to > f.sequence_number:
+            self.close(0x07, "NEW_CONNECTION_ID: retire_prior_to exceeds sequence_number", application=False)
+            return
+
+        existing = self.peer_cids.get(f.sequence_number)
+        if existing is not None and existing != f.connection_id:
+            self.close(0x0a, "NEW_CONNECTION_ID: sequence number reused with a different CID", application=False)
+            return
+
+        if f.sequence_number >= self.peer_retire_prior_to:
+            self.peer_cids[f.sequence_number] = f.connection_id
+
+        if f.retire_prior_to > self.peer_retire_prior_to:
+            self.peer_retire_prior_to = f.retire_prior_to
+            for seq in sorted(self.peer_cids):
+                if seq < f.retire_prior_to:
+                    del self.peer_cids[seq]
+                    if seq not in self.retire_cids_pending:
+                        self.retire_cids_pending.append(seq)
+
+            if self.remote_cid_seq < f.retire_prior_to and self.peer_cids:
+                new_seq = min(self.peer_cids)
+                self.remote_cid = self.peer_cids[new_seq]
+                self.remote_cid_seq = new_seq
+
+        if len(self.peer_cids) > self.local_active_cid_limit:
+            self.close(0x09, "CONNECTION_ID_LIMIT_ERROR", application=False)
+
     def on_lost(self, lost: list[SentPacket]):
         for pkt in lost:
             for item in pkt.frames:
@@ -877,6 +941,12 @@ class QUICConnection:
                     st = self.streams.get(item[1])
                     if st is not None:
                         st.max_stream_data_pending = True
+                elif kind == "new_cid":
+                    _, seq, cid, token = item
+                    if seq in self.local_cid_seqs:
+                        self.new_cids_pending.append((seq, cid, token))
+                elif kind == "retire_cid":
+                    self.retire_cids_pending.append(item[1])
 
     def handle_retry(self, hdr, data: bytes, offset: int) -> None:
         # RFC 9000 §17.2.5: a client accepts at most one Retry.
@@ -1065,6 +1135,19 @@ class QUICConnection:
                 payload += frames.MaxData(self.max_data_local).encode()
                 self.max_data_pending = False
                 sent_frames.append(("max_data",))
+                ack_eliciting = True
+
+            # Connection ID management (RFC 9000 §5.1).
+            while self.new_cids_pending and max_len - len(payload) > 48:
+                seq, cid, token = self.new_cids_pending.pop(0)
+                payload += frames.NewConnectionId(seq, 0, cid, token).encode()
+                sent_frames.append(("new_cid", seq, cid, token))
+                ack_eliciting = True
+
+            while self.retire_cids_pending and max_len - len(payload) > 16:
+                seq = self.retire_cids_pending.pop(0)
+                payload += frames.RetireConnectionId(seq).encode()
+                sent_frames.append(("retire_cid", seq))
                 ack_eliciting = True
 
             # Unreliable DATAGRAM frames (RFC 9221): sent best-effort, never
