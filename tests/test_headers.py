@@ -7,7 +7,6 @@ from __future__ import annotations
 import pytest
 from kaede.models import Headers
 
-
 class TestCaseInsensitivity:
     """RFC 9110 §5.1: Field names are case-insensitive"""
 
@@ -39,7 +38,6 @@ class TestCaseInsensitivity:
         h.set("X-Test", "first")
         h.set("x-test", "second")
         assert h.get("X-Test") == "second"
-
 
 class TestMultipleValues:
     """RFC 9110 §5.2: Multiple header field lines with same name"""
@@ -80,7 +78,6 @@ class TestMultipleValues:
         assert "text/html" in accept_values
         assert "application/json" in accept_values
 
-
 class TestSetBehavior:
     def test_set_override_true_replaces(self):
         h = Headers({"X-Test": "old"})
@@ -102,7 +99,6 @@ class TestSetBehavior:
         h.set("X-Test", "new")
         assert h.get("X-Test") == "new"
 
-
 class TestRemove:
     def test_remove_existing(self):
         h = Headers({"X-Test": "value"})
@@ -119,7 +115,6 @@ class TestRemove:
         h = Headers({})
         h.remove("X-Missing")  # should not raise
 
-
 class TestGetDefault:
     def test_missing_key_returns_none(self):
         h = Headers({})
@@ -128,7 +123,6 @@ class TestGetDefault:
     def test_missing_key_returns_default(self):
         h = Headers({})
         assert h.get("X-Missing", "fallback") == "fallback"
-
 
 class TestVaryHeader:
     """RFC 7231 §7.1.4: Vary header management"""
@@ -171,10 +165,7 @@ class TestVaryHeader:
         vary = h.get("Vary")
         assert vary.count("ncoding") == 1
 
-
-# ---------------------------------------------------------------------------
 # RFC 9110 §5.1: items() and __getitem__ / __setitem__
-# ---------------------------------------------------------------------------
 
 class TestItemsMethod:
     def test_items_returns_lowercase_keys(self):
@@ -200,7 +191,6 @@ class TestItemsMethod:
         keys = [k for k, v in h.items()]
         assert keys == ["x-first", "x-second", "x-third"]
 
-
 class TestGetitemSetitem:
     def test_getitem_case_insensitive(self):
         """h[key] must behave case-insensitively like h.get(key)"""
@@ -221,7 +211,6 @@ class TestGetitemSetitem:
         h["X-Test"] = "new"
         assert h.get("X-Test") == "new"
 
-
 class TestHeadersInitialization:
     def test_empty_headers_dict(self):
         h = Headers({})
@@ -240,7 +229,6 @@ class TestHeadersInitialization:
         h.remove("X-Test")
         assert "X-Test" not in h
         assert "x-test" not in h
-
 
 class TestVaryEdgeCases:
     def test_append_vary_to_existing_multi_value_vary(self):

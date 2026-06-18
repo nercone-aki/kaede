@@ -7,10 +7,7 @@ from __future__ import annotations
 import pytest
 from kaede.huffman import huffman_encode, huffman_decode, HUFFMAN_TABLE
 
-
-# ---------------------------------------------------------------------------
 # RFC 7541 Appendix C test vectors (Huffman-encoded header values)
-# ---------------------------------------------------------------------------
 
 # Source: RFC 7541 Appendix C.4 (Request examples with Huffman encoding)
 RFC7541_VECTORS: list[tuple[bytes, bytes]] = [
@@ -20,20 +17,12 @@ RFC7541_VECTORS: list[tuple[bytes, bytes]] = [
     (b"custom-key",      bytes.fromhex("25a849e95ba97d7f")),
     (b"custom-value",    bytes.fromhex("25a849e95bb8e8b4bf")),
     # RFC 7541 Appendix C.6
-    (b"Mon, 21 Oct 2013 20:13:21 GMT",
-     bytes.fromhex("d07abe941054d444a8200595040b8166e082a62d1bff")),
-    (b"https://www.example.com",
-     bytes.fromhex("9d29ad171863c78f0b97c8e9ae82ae43d3")),
+    (b"Mon, 21 Oct 2013 20:13:21 GMT", bytes.fromhex("d07abe941054d444a8200595040b8166e082a62d1bff")),
+    (b"https://www.example.com", bytes.fromhex("9d29ad171863c78f0b97c8e9ae82ae43d3")),
     (b"307",  bytes.fromhex("640eff")),
     (b"gzip", bytes.fromhex("9bd9ab")),
-    (b"foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1",
-     bytes.fromhex(
-         "94e7821dd7f2e6c7b335dfdfcd5b3960"
-         "d5af27087f3672c1ab270fb5291f9587"
-         "316065c003ed4ee5b1063d5007"
-     )),
+    (b"foo=ASDJKHQKBZXOQWEOPIUAXQWEOIU; max-age=3600; version=1", bytes.fromhex("94e7821dd7f2e6c7b335dfdfcd5b3960d5af27087f3672c1ab270fb5291f9587316065c003ed4ee5b1063d5007"))
 ]
-
 
 class TestRFC7541Vectors:
     @pytest.mark.parametrize("plaintext,expected", RFC7541_VECTORS)
@@ -46,10 +35,7 @@ class TestRFC7541Vectors:
         """Decoding the RFC vector must recover the original string"""
         assert huffman_decode(expected) == plaintext
 
-
-# ---------------------------------------------------------------------------
 # Round-trip properties
-# ---------------------------------------------------------------------------
 
 class TestRoundTrip:
     def test_all_byte_values(self):
@@ -75,10 +61,7 @@ class TestRoundTrip:
         assert isinstance(huffman_encode(b"test"), bytes)
         assert isinstance(huffman_decode(huffman_encode(b"test")), bytes)
 
-
-# ---------------------------------------------------------------------------
 # RFC 7541 §5.2: Padding rules
-# ---------------------------------------------------------------------------
 
 class TestPadding:
     def test_padding_uses_high_order_eos_bits(self):
@@ -108,10 +91,7 @@ class TestPadding:
         with pytest.raises((RuntimeError, Exception)):
             huffman_decode(bytes([0xFF]))
 
-
-# ---------------------------------------------------------------------------
 # RFC 7541 §5.2: EOS symbol (code 256)
-# ---------------------------------------------------------------------------
 
 class TestEOSSymbol:
     def test_eos_not_produced_by_encode(self):
@@ -135,10 +115,7 @@ class TestEOSSymbol:
         assert eos_code == 0x3FFFFFFF
         assert eos_bits == 30
 
-
-# ---------------------------------------------------------------------------
 # Huffman table properties
-# ---------------------------------------------------------------------------
 
 class TestHuffmanTable:
     def test_table_has_257_entries(self):
@@ -161,10 +138,7 @@ class TestHuffmanTable:
         for sym, (code, bits) in enumerate(HUFFMAN_TABLE):
             assert 5 <= bits <= 30, f"Symbol {sym} has {bits}-bit code outside [5,30]"
 
-
-# ---------------------------------------------------------------------------
 # RFC 7541 Appendix B: specific symbol code verification
-# ---------------------------------------------------------------------------
 
 class TestSpecificSymbolCodes:
     """Spot-check individual entries from RFC 7541 Appendix B"""
@@ -199,10 +173,7 @@ class TestSpecificSymbolCodes:
         assert code == 0x18
         assert bits == 6
 
-
-# ---------------------------------------------------------------------------
 # Additional round-trip and encode properties
-# ---------------------------------------------------------------------------
 
 class TestHuffmanProperties:
     def test_encode_length_never_exceeds_input_by_too_much(self):

@@ -4,23 +4,9 @@ RFC 9204 (QPACK) and RFC 7541 §5.1 integer encoding conformance tests.
 from __future__ import annotations
 
 import pytest
-from kaede.http.qpack import (
-    encode_integer,
-    decode_integer,
-    encode_string,
-    decode_string,
-    encode_headers,
-    decode_headers,
-    STATIC_TABLE,
-    STATIC_INDEX_BY_HEADER,
-    STATIC_INDEX_BY_NAME,
-    QpackError,
-)
+from kaede.http.qpack import QpackError, encode_integer, decode_integer, encode_string, decode_string, encode_headers, decode_headers, STATIC_TABLE, STATIC_INDEX_BY_HEADER, STATIC_INDEX_BY_NAME
 
-
-# ---------------------------------------------------------------------------
 # RFC 7541 §5.1 / RFC 9204 §4.1.1: Integer Representation
-# ---------------------------------------------------------------------------
 
 class TestIntegerEncoding:
     """RFC 7541 §5.1: Prefix Integer Representation"""
@@ -75,10 +61,7 @@ class TestIntegerEncoding:
         _, end = decode_integer(encoded, 0, 5)
         assert end == len(encoded)
 
-
-# ---------------------------------------------------------------------------
 # RFC 7541 §5.2 / RFC 9204 §4.1.2: String Literal Representation
-# ---------------------------------------------------------------------------
 
 class TestStringEncoding:
     def test_roundtrip_ascii(self):
@@ -104,10 +87,7 @@ class TestStringEncoding:
         _, end = decode_string(encoded, 0, 7)
         assert end == len(encoded) - 1  # sentinel not consumed
 
-
-# ---------------------------------------------------------------------------
 # RFC 9204 Appendix A: QPACK Static Table
-# ---------------------------------------------------------------------------
 
 class TestStaticTable:
     def test_non_empty(self):
@@ -141,10 +121,7 @@ class TestStaticTable:
     def test_index_by_name_populated(self):
         assert b":authority" in STATIC_INDEX_BY_NAME
 
-
-# ---------------------------------------------------------------------------
 # RFC 9204 §3: QPACK header field line representations
-# ---------------------------------------------------------------------------
 
 class TestDecodeHeaders:
     def test_empty_section(self):
@@ -219,7 +196,6 @@ class TestDecodeHeaders:
         filtered = [(n, v) for n, v in injected if b"\x00" not in v]
         assert filtered == []
 
-
 class TestEncodeHeaders:
     def test_produces_bytes(self):
         headers = [(b":method", b"GET"), (b":path", b"/")]
@@ -283,10 +259,7 @@ class TestEncodeHeaders:
         for h in headers:
             assert h in decoded
 
-
-# ---------------------------------------------------------------------------
 # RFC 9204 §4.1.1: Integer encoding edge cases
-# ---------------------------------------------------------------------------
 
 class TestIntegerEncodingEdgeCases:
     @pytest.mark.parametrize("prefix", [1, 2, 3, 4, 5, 6, 7, 8])
@@ -313,10 +286,7 @@ class TestIntegerEncodingEdgeCases:
             decoded, _ = decode_integer(encoded, 0, 5)
             assert decoded == 15
 
-
-# ---------------------------------------------------------------------------
 # RFC 9204 §4.1.2: String encoding with Huffman
-# ---------------------------------------------------------------------------
 
 class TestStringEncodingHuffman:
     def test_encode_string_literal_roundtrip(self):

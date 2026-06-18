@@ -3,28 +3,15 @@ RFC 6455 (WebSocket) conformance tests.
 """
 from __future__ import annotations
 
+import pytest
 import struct
 import base64
-import pytest
 
-from kaede.websocket import (
-    build_frame,
-    parse_frames,
-    compute_accept,
-    check_accept,
-    generate_key,
-    Opcode,
-    WebSocket,
-    PerMessageDeflate,
-    WebSocketProtocolError,
-)
+from kaede.websocket import WebSocket, WebSocketProtocolError, PerMessageDeflate, Opcode, build_frame, parse_frames, compute_accept, check_accept, generate_key
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-
-# ---------------------------------------------------------------------------
 # RFC 6455 §4.1: Opening handshake – Sec-WebSocket-Accept
-# ---------------------------------------------------------------------------
 
 class TestHandshake:
     def test_compute_accept_rfc_example(self):
@@ -59,10 +46,7 @@ class TestHandshake:
         ).decode()
         assert compute_accept(key) == expected_sha1
 
-
-# ---------------------------------------------------------------------------
 # RFC 6455 §5.2: Frame format
-# ---------------------------------------------------------------------------
 
 class TestFrameBuilding:
     def test_small_payload_header(self):
@@ -122,10 +106,7 @@ class TestFrameBuilding:
         frame = build_frame(Opcode.BINARY, b"x")
         assert (frame[0] & 0x0F) == Opcode.BINARY
 
-
-# ---------------------------------------------------------------------------
 # RFC 6455 §5.2: Frame parsing
-# ---------------------------------------------------------------------------
 
 class TestFrameParsing:
     def test_parse_unmasked_text(self):
@@ -205,10 +186,7 @@ class TestFrameParsing:
         frames = parse_frames(buf)
         assert frames[0].rsv_other is True
 
-
-# ---------------------------------------------------------------------------
 # RFC 6455 §5.x: WebSocket server frame handler
-# ---------------------------------------------------------------------------
 
 class MockTransport:
     def __init__(self):
@@ -221,12 +199,10 @@ class MockTransport:
     def close(self):
         self.closed = True
 
-
 def make_ws(**kwargs) -> tuple[WebSocket, MockTransport]:
     transport = MockTransport()
     ws = WebSocket(transport, **kwargs)
     return ws, transport
-
 
 def feed(ws: WebSocket, raw: bytes):
     buf = bytearray(raw)
@@ -234,11 +210,9 @@ def feed(ws: WebSocket, raw: bytes):
     for f in frames:
         ws.feed_frame(f)
 
-
 def parse_written(transport: MockTransport) -> list:
     buf = bytearray(bytes(transport.written))
     return parse_frames(buf)
-
 
 class TestPingPong:
     def test_ping_receives_pong(self):
@@ -263,7 +237,6 @@ class TestPingPong:
         assert not transport.closed
         assert len(transport.written) == 0
 
-
 class TestControlFrameConstraints:
     def test_ping_payload_over_125_closes_1002(self):
         """RFC 6455 §5.5: Control frames MUST NOT exceed 125 bytes payload"""
@@ -281,7 +254,6 @@ class TestControlFrameConstraints:
             ws.feed_frame(f)
         assert transport.closed
 
-
 class TestMasking:
     def test_unmasked_client_frame_closes_1002(self):
         """RFC 6455 §5.1: All frames from client MUST be masked; else server closes with 1002"""
@@ -295,7 +267,6 @@ class TestMasking:
         assert not transport.closed
         msg = ws.queue.get_nowait()
         assert msg == b"hello"
-
 
 class TestCloseHandshake:
     def test_close_frame_echoed(self):
@@ -342,7 +313,6 @@ class TestCloseHandshake:
         # payload should be empty (invalid code not echoed)
         assert close.payload == b""
 
-
 class TestRSVBits:
     def test_rsv2_set_without_extension_closes(self):
         """RFC 6455 §5.2: RSV2/RSV3 must be 0 unless an extension is negotiated"""
@@ -359,7 +329,6 @@ class TestRSVBits:
         ws, transport = make_ws(require_masking=False, deflate=None)
         feed(ws, build_frame(Opcode.TEXT, b"x", rsv1=True))
         assert transport.closed
-
 
 class TestFragmentation:
     def test_fragmented_text_reassembled(self):
@@ -394,7 +363,6 @@ class TestFragmentation:
         feed(ws, build_frame(Opcode.CONTINUATION, b"x", fin=True))
         assert transport.closed
 
-
 class TestTextEncoding:
     def test_valid_utf8_text_accepted(self):
         """RFC 6455 §8.1: Text frames must contain valid UTF-8"""
@@ -420,14 +388,7 @@ class TestTextEncoding:
         msg = ws.queue.get_nowait()
         assert msg == b"\xff\xfe\x00\x01"
 
-
-# ---------------------------------------------------------------------------
-# RFC 7692: permessage-deflate extension
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # RFC 6455 §7.4.2: Close status code validity
-# ---------------------------------------------------------------------------
 
 class TestCloseCodeValidity:
     """RFC 6455 §7.4.2: Reserved/invalid codes must not be echoed"""
@@ -468,10 +429,7 @@ class TestCloseCodeValidity:
         close = next(f for f in frames if f.opcode == Opcode.CLOSE)
         assert struct.unpack(">H", close.payload[:2])[0] == code
 
-
-# ---------------------------------------------------------------------------
 # RFC 6455 §5.4: Fragmentation of binary messages
-# ---------------------------------------------------------------------------
 
 class TestBinaryFragmentation:
     def test_fragmented_binary_reassembled(self):
@@ -501,10 +459,7 @@ class TestBinaryFragmentation:
         msg = ws.queue.get_nowait()
         assert msg == b"\x00\xff\xfe\xfd"
 
-
-# ---------------------------------------------------------------------------
 # RFC 6455 §4.1: Handshake key uniqueness
-# ---------------------------------------------------------------------------
 
 class TestHandshakeKeyUniqueness:
     def test_generate_key_unique_each_call(self):
@@ -519,10 +474,7 @@ class TestHandshakeKeyUniqueness:
         decoded = base64.b64decode(key)
         assert len(decoded) == 16
 
-
-# ---------------------------------------------------------------------------
 # RFC 6455 §5.5: Control frame size limit (PONG)
-# ---------------------------------------------------------------------------
 
 class TestPongConstraints:
     def test_pong_payload_over_125_closes_1002(self):
@@ -537,10 +489,7 @@ class TestPongConstraints:
         feed(ws, build_frame(Opcode.PONG, b"x" * 125))
         assert not transport.closed
 
-
-# ---------------------------------------------------------------------------
 # RFC 6455 §5.5.1: Close frame after close (no double-close)
-# ---------------------------------------------------------------------------
 
 class TestCloseOnceOnly:
     def test_after_close_transport_is_closed(self):
@@ -555,7 +504,6 @@ class TestCloseOnceOnly:
         feed(ws, build_frame(Opcode.CLOSE, b""))
         sentinel = ws.queue.get_nowait()
         assert sentinel is None
-
 
 class TestPerMessageDeflate:
     def test_compress_decompress_roundtrip(self):

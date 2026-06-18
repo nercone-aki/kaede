@@ -4,16 +4,12 @@ RFC 9113 (HTTP/2) header building conformance tests.
 from __future__ import annotations
 
 import pytest
-from kaede.http.h2 import H2, H2_FORBIDDEN_HEADERS
 from kaede.models import Request, Response, Headers
-
+from kaede.http.h2 import H2, H2_FORBIDDEN_HEADERS
 
 FORBIDDEN = list(H2_FORBIDDEN_HEADERS)
 
-
-# ---------------------------------------------------------------------------
 # RFC 9113 §8.2.2: Connection-specific header fields
-# ---------------------------------------------------------------------------
 
 class TestForbiddenResponseHeaders:
     """RFC 9113 §8.2.2: Connection-specific headers MUST NOT appear in HTTP/2"""
@@ -34,7 +30,6 @@ class TestForbiddenResponseHeaders:
         names = [n for n, v in built]
         assert "content-type" in names  # normal header passes through
 
-
 class TestForbiddenRequestHeaders:
     @pytest.mark.parametrize("header", FORBIDDEN)
     def test_forbidden_stripped_from_request(self, header):
@@ -43,10 +38,7 @@ class TestForbiddenRequestHeaders:
         names = [n for n, v in built]
         assert header not in names
 
-
-# ---------------------------------------------------------------------------
 # RFC 9113 §8.3: Pseudo-header fields
-# ---------------------------------------------------------------------------
 
 class TestResponsePseudoHeaders:
     def test_status_is_first_header(self):
@@ -65,7 +57,6 @@ class TestResponsePseudoHeaders:
         response = Response(status_code=code)
         built = H2.build_response_headers(response)
         assert built[0] == (":status", str(code))
-
 
 class TestRequestPseudoHeaders:
     """RFC 9113 §8.3.1: Request pseudo-headers"""
@@ -125,10 +116,7 @@ class TestRequestPseudoHeaders:
         if pseudo_indices and regular_indices:
             assert max(pseudo_indices) < min(regular_indices)
 
-
-# ---------------------------------------------------------------------------
 # RFC 9113 §8.2: Header field names must be lowercase
-# ---------------------------------------------------------------------------
 
 class TestHeaderCasing:
     def test_response_header_names_are_lowercase(self):
@@ -153,10 +141,7 @@ class TestHeaderCasing:
             if not name.startswith(":"):
                 assert name == name.lower(), f"Header name {name!r} is not lowercase"
 
-
-# ---------------------------------------------------------------------------
 # Security: CRLF injection prevention
-# ---------------------------------------------------------------------------
 
 class TestHeaderInjection:
     def test_crlf_in_response_name_filtered(self):
@@ -195,10 +180,7 @@ class TestHeaderInjection:
         values = [v for n, v in built]
         assert not any("\r" in v or "\n" in v for v in values)
 
-
-# ---------------------------------------------------------------------------
 # RFC 9113 §8.4: Extended CONNECT (WebSocket over HTTP/2)
-# ---------------------------------------------------------------------------
 
 class TestWebSocketConnect:
     def test_build_connect_websocket_headers_method(self):
@@ -228,10 +210,7 @@ class TestWebSocketConnect:
         names = [n for n, v in built]
         assert "host" not in names
 
-
-# ---------------------------------------------------------------------------
 # RFC 9113 §8.2.2: TE header handling
-# ---------------------------------------------------------------------------
 
 class TestTEHeaderHandling:
     def test_te_trailers_passes_in_request(self):
@@ -250,10 +229,7 @@ class TestTEHeaderHandling:
         te_values = [v for n, v in built if n == "te"]
         assert "gzip" not in te_values
 
-
-# ---------------------------------------------------------------------------
 # RFC 9113 §8.3: Request pseudo-header ordering and completeness
-# ---------------------------------------------------------------------------
 
 class TestPseudoHeaderOrdering:
     def test_all_four_request_pseudos_present(self):
@@ -292,10 +268,7 @@ class TestPseudoHeaderOrdering:
         for pseudo in (":method", ":path", ":scheme", ":authority", ":protocol"):
             assert pseudo not in names
 
-
-# ---------------------------------------------------------------------------
 # RFC 9113 §8.1: Content-Length semantics in HTTP/2
-# ---------------------------------------------------------------------------
 
 class TestH2ContentLength:
     def test_content_length_with_empty_body_not_added(self):

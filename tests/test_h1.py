@@ -4,18 +4,15 @@ Validates against the RFC specification, not current Kaede behavior.
 """
 from __future__ import annotations
 
-import ipaddress
 import pytest
+import ipaddress
 
-from kaede.http.h1 import H1, HTTPVersionNotSupportedError, MethodNotImplementedError
 from kaede.models import Request, Response, Headers
+from kaede.http.h1 import H1, HTTPVersionNotSupportedError, MethodNotImplementedError
 
 CLIENT = (ipaddress.IPv4Address("127.0.0.1"), 12345)
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §3: Request line
-# ---------------------------------------------------------------------------
 
 class TestRequestLine:
     def test_valid_get(self):
@@ -72,10 +69,7 @@ class TestRequestLine:
         with pytest.raises(ValueError):
             H1.parse_request(b"GET /foo\nbar HTTP/1.1\r\nHost: example.com\r\n\r\n", client=CLIENT)
 
-
-# ---------------------------------------------------------------------------
 # RFC 9110 §7.2: Host header
-# ---------------------------------------------------------------------------
 
 class TestHostHeader:
     def test_missing_host_raises(self):
@@ -87,10 +81,7 @@ class TestHostHeader:
         req = H1.parse_request(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n", client=CLIENT)
         assert req.headers.get("Host") == "example.com"
 
-
-# ---------------------------------------------------------------------------
 # RFC 9110 §5.1 / RFC 9112 §5: Header fields
-# ---------------------------------------------------------------------------
 
 class TestHeaderFields:
     def test_obs_fold_rejected(self):
@@ -139,10 +130,7 @@ class TestHeaderFields:
         assert "text/html" in accept
         assert "application/json" in accept
 
-
-# ---------------------------------------------------------------------------
 # RFC 9110 §8.6 / RFC 9112 §6.3: Content-Length
-# ---------------------------------------------------------------------------
 
 class TestContentLength:
     def test_content_length_zero_body_none(self):
@@ -199,10 +187,7 @@ class TestContentLength:
                 max_body_size=4,
             )
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §7.1: Chunked transfer encoding
-# ---------------------------------------------------------------------------
 
 class TestChunkedEncoding:
     def test_single_chunk(self):
@@ -300,10 +285,7 @@ class TestChunkedEncoding:
                 max_body_size=4,
             )
 
-
-# ---------------------------------------------------------------------------
 # RFC 9110 §6.4: Responses without a body
-# ---------------------------------------------------------------------------
 
 class TestResponseHasNoBody:
     @pytest.mark.parametrize("status", [100, 101, 102, 103, 199])
@@ -333,10 +315,7 @@ class TestResponseHasNoBody:
     def test_404_has_body(self):
         assert H1.response_has_no_body(404, "GET") is False
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §4: Response format building
-# ---------------------------------------------------------------------------
 
 class TestBuildResponseHead:
     def test_status_line_format(self):
@@ -373,10 +352,7 @@ class TestBuildResponseHead:
         result = H1.build_response_head(response)
         assert b"content-type: text/html\r\n" in result
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §3: Request building
-# ---------------------------------------------------------------------------
 
 class TestBuildRequest:
     def test_request_line_format(self):
@@ -405,10 +381,7 @@ class TestBuildRequest:
         result = H1.build_request_head(req)
         assert b"Inj" not in result
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §4: Response parsing
-# ---------------------------------------------------------------------------
 
 class TestParseResponse:
     def test_200_with_content_length(self):
@@ -460,10 +433,7 @@ class TestParseResponse:
         with pytest.raises(ValueError):
             H1.parse_response(b"HTTP/1.1 200 OK\r\nX-Test : value\r\n\r\n")
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §7.1.2: scan_chunked
-# ---------------------------------------------------------------------------
 
 class TestScanChunked:
     def test_incomplete_returns_none(self):
@@ -489,10 +459,7 @@ class TestScanChunked:
         with pytest.raises(ValueError):
             H1.scan_chunked(b"-1\r\nhello\r\n0\r\n\r\n")
 
-
-# ---------------------------------------------------------------------------
 # RFC 9110 §7.2: Multiple Host headers
-# ---------------------------------------------------------------------------
 
 class TestMultipleHostHeader:
     def test_multiple_host_headers_rejected(self):
@@ -510,10 +477,7 @@ class TestMultipleHostHeader:
         )
         assert req.headers.get("Host") == "example.com"
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §6.3: Multiple Content-Length fields
-# ---------------------------------------------------------------------------
 
 class TestMultipleContentLength:
     def test_multiple_content_length_same_value_accepted(self):
@@ -534,10 +498,7 @@ class TestMultipleContentLength:
                 client=CLIENT,
             )
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §3.2 / §3.3: Request-target validation
-# ---------------------------------------------------------------------------
 
 class TestRequestTargetValidation:
     def test_empty_target_rejected(self):
@@ -573,10 +534,7 @@ class TestRequestTargetValidation:
         assert req.target == "example.com:443"
         assert req.method == "CONNECT"
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §6.2: Body framing edge cases
-# ---------------------------------------------------------------------------
 
 class TestBodyParsing:
     def test_content_length_body_truncated_at_cl(self):
@@ -612,10 +570,7 @@ class TestBodyParsing:
         )
         assert req.body == b"data"
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §7.1: Chunked encoding hex-digit edge cases
-# ---------------------------------------------------------------------------
 
 class TestChunkedHexEdgeCases:
     def test_chunk_size_uppercase_hex(self):
@@ -654,10 +609,7 @@ class TestChunkedHexEdgeCases:
         )
         assert req.body == b"hello"
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §6.1: Transfer-Encoding validation
-# ---------------------------------------------------------------------------
 
 class TestTransferEncodingValidation:
     def test_transfer_encoding_identity_rejected(self):
@@ -685,10 +637,7 @@ class TestTransferEncodingValidation:
         )
         assert req.body == b"hello"
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §4: Response parsing edge cases
-# ---------------------------------------------------------------------------
 
 class TestResponseParsingEdgeCases:
     def test_response_content_length_exceeds_max_body_size(self):
@@ -724,10 +673,7 @@ class TestResponseParsingEdgeCases:
         )
         assert resp.body == b"hello"
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §4: build_response_head edge cases
-# ---------------------------------------------------------------------------
 
 class TestBuildResponseHeadEdgeCases:
     def test_non_standard_status_code_empty_phrase(self):
@@ -749,10 +695,7 @@ class TestBuildResponseHeadEdgeCases:
         assert b"content-type: text/html\r\n" in result
         assert b"x-custom: val\r\n" in result
 
-
-# ---------------------------------------------------------------------------
 # RFC 9112 §3: build_request edge cases
-# ---------------------------------------------------------------------------
 
 class TestBuildRequestEdgeCases:
     def test_request_method_and_target_in_line(self):

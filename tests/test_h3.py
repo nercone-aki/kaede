@@ -4,28 +4,11 @@ RFC 9114 (HTTP/3) and RFC 9000 (QUIC variable-length integer) conformance tests.
 from __future__ import annotations
 
 import pytest
-from kaede.http.h3 import (
-    H3,
-    H3_FORBIDDEN_HEADERS,
-    FRAME_DATA,
-    FRAME_HEADERS,
-    FRAME_SETTINGS,
-    FRAME_GOAWAY,
-    FRAME_PUSH_PROMISE,
-    FRAME_CANCEL_PUSH,
-    FRAME_MAX_PUSH_ID,
-    SETTINGS_QPACK_MAX_TABLE_CAPACITY,
-    SETTINGS_QPACK_BLOCKED_STREAMS,
-    SETTINGS_ENABLE_CONNECT_PROTOCOL,
-    FORBIDDEN_H2_SETTINGS,
-)
-from kaede.quic.packet import Buffer, encode_uint_var
 from kaede.models import Request, Response, Headers
+from kaede.http.h3 import H3, H3_FORBIDDEN_HEADERS, FRAME_DATA, FRAME_HEADERS, FRAME_SETTINGS, SETTINGS_QPACK_MAX_TABLE_CAPACITY, SETTINGS_QPACK_BLOCKED_STREAMS, SETTINGS_ENABLE_CONNECT_PROTOCOL, FORBIDDEN_H2_SETTINGS
+from kaede.quic.packet import Buffer, encode_uint_var
 
-
-# ---------------------------------------------------------------------------
 # RFC 9000 §16: QUIC Variable-Length Integer Encoding
-# ---------------------------------------------------------------------------
 
 class TestVarIntEncoding:
     """RFC 9000 §16: 2-bit prefix selects 1/2/4/8-byte encoding"""
@@ -79,10 +62,7 @@ class TestVarIntEncoding:
         buf.pull_uint_var()
         assert buf.eof()
 
-
-# ---------------------------------------------------------------------------
 # RFC 9114 §7: HTTP/3 Frame Format
-# ---------------------------------------------------------------------------
 
 class TestH3FrameFormat:
     def test_encode_frame_type_and_length(self):
@@ -111,10 +91,7 @@ class TestH3FrameFormat:
         buf = Buffer(settings)
         assert buf.pull_uint_var() == FRAME_SETTINGS
 
-
-# ---------------------------------------------------------------------------
 # RFC 9114 §7.2.4.1: SETTINGS – forbidden HTTP/2 settings
-# ---------------------------------------------------------------------------
 
 class TestH3Settings:
     def test_no_forbidden_h2_settings(self):
@@ -183,10 +160,7 @@ class TestH3Settings:
 
         assert settings.get(SETTINGS_ENABLE_CONNECT_PROTOCOL) == 1
 
-
-# ---------------------------------------------------------------------------
 # RFC 9114 §4.2: HTTP/3 response headers
-# ---------------------------------------------------------------------------
 
 class TestH3ResponseHeaders:
     def test_status_pseudo_header_first(self):
@@ -237,10 +211,7 @@ class TestH3ResponseHeaders:
         values = [v for n, v in built]
         assert not any(b"\x00" in v for v in values)
 
-
-# ---------------------------------------------------------------------------
 # RFC 9114 §4.3: HTTP/3 request headers
-# ---------------------------------------------------------------------------
 
 class TestH3RequestHeaders:
     def test_method_pseudo(self):
