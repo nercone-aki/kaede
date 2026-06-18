@@ -134,9 +134,13 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
                     etag = response.headers.get("ETag", "").strip()
                     last_modified = response.headers.get("Last-Modified", "").strip()
 
-                    if if_range.startswith('"') or if_range.startswith("W/"):
+                    if if_range.startswith('"'):
                         if if_range != etag:
                             range_header = ""
+
+                    elif if_range.startswith("W/"):
+                        range_header = ""
+
                     else:
                         if if_range != last_modified:
                             range_header = ""
@@ -198,9 +202,13 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
                     etag = response.headers.get("ETag", "").strip()
                     last_modified = response.headers.get("Last-Modified", "").strip()
 
-                    if if_range.startswith('"') or if_range.startswith("W/"):
+                    if if_range.startswith('"'):
                         if if_range != etag:
                             range_header = ""
+
+                    elif if_range.startswith("W/"):
+                        range_header = ""
+
                     else:
                         if if_range != last_modified:
                             range_header = ""

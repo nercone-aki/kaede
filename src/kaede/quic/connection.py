@@ -295,7 +295,10 @@ class QUICConnection:
         while offset < len(data):
             first = data[offset]
 
-            if not (first & packet.PACKET_FIXED_BIT) and not (first & packet.PACKET_LONG_HEADER):
+            if not (first & packet.PACKET_FIXED_BIT):
+                if first & packet.PACKET_LONG_HEADER:
+                    self.close(0x0a, "Fixed bit violation", application=False)
+                    return
                 break
 
             try:
@@ -453,8 +456,10 @@ class QUICConnection:
             elif ftype is frames.Ack:
                 ack_delay_exp = int(self.peer_transport_params.get(TP_ACK_DELAY_EXPONENT, 3) or 3) if self.peer_transport_params else 3
                 ack_delay_seconds = f.delay * (2 ** ack_delay_exp) / 1_000_000
+                peer_max_ack_delay_ms = int(self.peer_transport_params.get(TP_MAX_ACK_DELAY, 25) or 25) if self.peer_transport_params else 25
+                peer_max_ack_delay = peer_max_ack_delay_ms / 1000.0
 
-                acked, lost = self.recovery.on_ack_received(space, f.largest, ack_delay_seconds, f.ranges, now)
+                acked, lost = self.recovery.on_ack_received(space, f.largest, ack_delay_seconds, f.ranges, now, peer_max_ack_delay)
                 self.on_lost(lost)
 
                 if not self.is_client and self.handshake_complete and level == LEVEL_APPLICATION:
@@ -516,6 +521,10 @@ class QUICConnection:
 
         if ack_eliciting:
             self.ack_needed[space] = True
+
+        if not self.is_client and level == LEVEL_HANDSHAKE and (LEVEL_INITIAL in self.send_keys or LEVEL_INITIAL in self.recv_keys):
+            self.send_keys.pop(LEVEL_INITIAL, None)
+            self.recv_keys.pop(LEVEL_INITIAL, None)
 
     def on_stream_frame(self, f: frames.Stream):
         stream = self.ensure_stream(f.stream_id)
@@ -702,7 +711,7 @@ class QUICConnection:
 
         self.recovery.on_packet_sent(SentPacket(pn, space, now, ack_eliciting, ack_eliciting, len(buf), sent_frames))
 
-        if level == LEVEL_HANDSHAKE and LEVEL_INITIAL in self.send_keys:
+        if self.is_client and level == LEVEL_HANDSHAKE and LEVEL_INITIAL in self.send_keys:
             self.send_keys.pop(LEVEL_INITIAL, None)
             self.recv_keys.pop(LEVEL_INITIAL, None)
 

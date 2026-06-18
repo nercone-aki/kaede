@@ -396,3 +396,14 @@ class WebSocket:
         payload = struct.pack(">H", code) + reason.encode("utf-8")
         self.write(build_frame(Opcode.CLOSE, payload, mask=self.mask_frames))
         self.queue.put_nowait(None)
+
+        def force_close():
+            try:
+                self.transport.close()
+            except Exception:
+                pass
+
+        try:
+            asyncio.get_running_loop().call_later(5.0, force_close)
+        except RuntimeError:
+            pass

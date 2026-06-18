@@ -14,6 +14,13 @@ from ..websocket import WebSocket, WebSocketProtocolError, compute_accept, parse
 from ..handler.common import StreamState, consume_response, negotiate_websocket, MAX_RESPONSE_HEADER_SIZE
 from ..handler.tcp import TCPProtocol
 
+TCHAR = frozenset(
+    b"!#$%&'*+-.^_`|~"
+    + bytes(range(0x30, 0x3A))   # 0-9
+    + bytes(range(0x41, 0x5B))   # A-Z
+    + bytes(range(0x61, 0x7B))   # a-z
+)
+
 class H1:
     @staticmethod
     def parse_request(data: bytes, *, client: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int], scheme: Literal["http", "https"] = "http", secure: bool = False, tls: TLSInfo | None = None, max_body_size: int | None = None) -> Request:
@@ -48,6 +55,9 @@ class H1:
 
             if name_b != name_b.rstrip(b" \t"):
                 raise ValueError("whitespace before colon in header field name")
+
+            if not name_b or not all(c in TCHAR for c in name_b):
+                raise ValueError(f"invalid character in header field name: {name_b!r}")
 
             headers.append(name_b.decode("latin-1"), value_b.decode("latin-1").strip())
 
@@ -178,6 +188,9 @@ class H1:
 
             if name_b != name_b.rstrip(b" \t"):
                 raise ValueError("whitespace before colon in header field name")
+
+            if not name_b or not all(c in TCHAR for c in name_b):
+                raise ValueError(f"invalid character in header field name: {name_b!r}")
 
             headers.append(name_b.decode("latin-1"), value_b.decode("latin-1").strip())
 

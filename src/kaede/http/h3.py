@@ -252,7 +252,7 @@ class H3Connection:
             elif frame_type == FRAME_DATA:
                 out.append(DataReceived(sid, payload, stream_ended=False))
 
-            elif frame_type in (0x2, 0x6, 0x8, 0x9):
+            elif frame_type in (0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xD):
                 self.quic.close(0x0105, "H3_FRAME_UNEXPECTED")
                 return
 
@@ -341,6 +341,21 @@ class H3Connection:
             self.send_headers(stream_id, [(b":status", b"413")], end_stream=True)
             self.flush()
             return
+
+        for nameb, valueb in asm.headers:
+            name = nameb.decode("ascii", "replace").lower() if isinstance(nameb, (bytes, bytearray)) else nameb.lower()
+            if name.startswith(":"):
+                continue
+            if name in H3_FORBIDDEN_HEADERS:
+                self.send_headers(stream_id, [(b":status", b"400")], end_stream=True)
+                self.flush()
+                return
+            if name == "te":
+                val = valueb.decode("utf-8", "replace").strip().lower() if isinstance(valueb, (bytes, bytearray)) else valueb.strip().lower()
+                if val != "trailers":
+                    self.send_headers(stream_id, [(b":status", b"400")], end_stream=True)
+                    self.flush()
+                    return
 
         request = self.build_request(stream_id, asm)
 

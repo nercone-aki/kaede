@@ -221,21 +221,37 @@ class H2Connection:
             if isinstance(event, h2.events.RequestReceived):
                 stream = RawRequest(scheme=scheme)
                 websocket_protocol: str | None = None
+                forbidden_header = False
+                has_scheme = False
+                has_path = False
 
                 for name, value in event.headers:
                     if name == ":method":
                         stream.method = value
                     elif name == ":path":
                         stream.target = value
+                        has_path = True
                     elif name == ":scheme":
                         stream.scheme = value
+                        has_scheme = True
                     elif name == ":authority":
                         stream.authority = value
                         stream.headers.append("host", value)
                     elif name == ":protocol":
                         websocket_protocol = value
                     elif not name.startswith(":"):
+                        lname = name.lower()
+                        if lname in H2_FORBIDDEN_HEADERS or (lname == "te" and value.strip().lower() != "trailers"):
+                            forbidden_header = True
+                            break
                         stream.headers.append(name, value)
+
+                if forbidden_header:
+                    try:
+                        self.connection.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR)
+                    except Exception:
+                        pass
+                    continue
 
                 if stream.method not in ("GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"):
                     try:
@@ -261,6 +277,13 @@ class H2Connection:
                     continue
 
                 if is_extended_connect:
+                    if not has_scheme or not has_path:
+                        try:
+                            self.connection.reset_stream(event.stream_id, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR)
+                        except Exception:
+                            pass
+                        continue
+
                     queue: asyncio.Queue[bytes | None] = asyncio.Queue()
                     self.websocket_streams[event.stream_id] = queue
                     request = Request(client=client, scheme=stream.scheme if stream.scheme in ("http", "https") else "https", secure=secure, protocol="HTTP/2.0", method="GET", target=stream.target, headers=stream.headers, body=None, h2=H2Info(connection_id=self.connection_id, stream_id=event.stream_id), h3=None, tls=tls)
@@ -431,7 +454,11 @@ class H2Connection:
                         pass
                     return None
             except ValueError:
-                pass
+                try:
+                    self.connection.reset_stream(stream_id, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR)
+                except Exception:
+                    pass
+                return None
 
         return Request(client=client, scheme=stream.scheme if stream.scheme in ("http", "https") else "https", secure=secure, protocol="HTTP/2.0", method=stream.method, target=stream.target, headers=stream.headers, body=body, h2=H2Info(connection_id=self.connection_id, stream_id=stream_id), h3=None, tls=tls)
 

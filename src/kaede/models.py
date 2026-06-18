@@ -60,7 +60,7 @@ class Request:
         except Exception:
             key_valid = False
 
-        return upgrade == "websocket" and "upgrade" in connection and key_valid and websocket_version == "13"
+        return self.method == "GET" and upgrade == "websocket" and "upgrade" in connection and key_valid and websocket_version == "13"
 
     async def compress(self, encoding: str = "zstd"):
         if not (self.body is not None and self.compression):

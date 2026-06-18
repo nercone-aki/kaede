@@ -72,7 +72,7 @@ class Recovery:
         if packet.ack_eliciting:
             space.time_of_last_ack_eliciting = packet.time_sent
 
-    def on_ack_received(self, space_id: int, largest_acked: int, ack_delay: float, ack_ranges: list[tuple[int, int]], now: float) -> tuple[list[SentPacket], list[SentPacket]]:
+    def on_ack_received(self, space_id: int, largest_acked: int, ack_delay: float, ack_ranges: list[tuple[int, int]], now: float, peer_max_ack_delay: float = 0.025) -> tuple[list[SentPacket], list[SentPacket]]:
         space = self.spaces[space_id]
         space.largest_acked = max(space.largest_acked or 0, largest_acked)
 
@@ -88,7 +88,7 @@ class Recovery:
         largest = max(p.packet_number for p in newly_acked)
         largest_pkt = next((p for p in newly_acked if p.packet_number == largest), None)
         if largest_pkt is not None and largest_pkt.ack_eliciting and largest == largest_acked:
-            self.update_rtt(now - largest_pkt.time_sent, ack_delay)
+            self.update_rtt(now - largest_pkt.time_sent, ack_delay, peer_max_ack_delay)
 
         for pkt in newly_acked:
             if pkt.in_flight:
@@ -99,7 +99,7 @@ class Recovery:
         lost = self.detect_lost_packets(space_id, now)
         return newly_acked, lost
 
-    def update_rtt(self, latest_rtt: float, ack_delay: float):
+    def update_rtt(self, latest_rtt: float, ack_delay: float, peer_max_ack_delay: float = 0.025):
         self.latest_rtt = latest_rtt
         self.min_rtt = min(self.min_rtt, latest_rtt)
         if not self.have_rtt:
@@ -107,7 +107,7 @@ class Recovery:
             self.smoothed_rtt = latest_rtt
             self.rtt_variance = latest_rtt / 2
             return
-        ack_delay = min(ack_delay, 0.025)
+        ack_delay = min(ack_delay, peer_max_ack_delay)
         adjusted = latest_rtt
         if latest_rtt > self.min_rtt + ack_delay:
             adjusted = latest_rtt - ack_delay
