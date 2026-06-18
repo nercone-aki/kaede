@@ -280,7 +280,18 @@ class WebSocket:
 
                 elif len(frame.payload) >= 2:
                     code = struct.unpack(">H", frame.payload[:2])[0]
-                    if 1000 <= code <= 1003 or 1007 <= code <= 1011 or 3000 <= code <= 4999:
+
+                    try:
+                        frame.payload[2:].decode("utf-8")
+                        reason_valid = True
+                    except UnicodeDecodeError:
+                        reason_valid = False
+
+                    if not reason_valid:
+                        # RFC 6455 §5.5.1 / §8.1: the Close reason is UTF-8 text;
+                        # an invalid encoding fails the connection with 1007.
+                        echo = struct.pack(">H", 1007)
+                    elif 1000 <= code <= 1003 or 1007 <= code <= 1011 or 3000 <= code <= 4999:
                         echo = frame.payload[:2]
                     else:
                         echo = b""
