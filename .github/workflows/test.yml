@@ -6,15 +6,14 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
+  build-openssl:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    outputs:
+      version: ${{ steps.openssl-version.outputs.version }}
+      cache-key: ${{ steps.openssl-version.outputs.cache-key }}
 
     steps:
-      - uses: actions/checkout@v4
-
       - name: Resolve latest OpenSSL 3.x version
         id: openssl-version
         run: |
@@ -22,13 +21,14 @@ jobs:
             | jq -r '[.[] | select(.prerelease == false and .draft == false) | select(.tag_name | test("^openssl-3\\.")) | .tag_name] | first | ltrimstr("openssl-")')
           echo "Resolved OpenSSL version: ${VERSION}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "cache-key=openssl-${VERSION}-${{ runner.os }}-v2" >> $GITHUB_OUTPUT
 
       - name: Cache OpenSSL build
         id: cache-openssl
         uses: actions/cache@v4
         with:
-          path: ${{ env.HOME }}/openssl-3
-          key: openssl-${{ steps.openssl-version.outputs.version }}-${{ runner.os }}-v2
+          path: ~/openssl-3
+          key: ${{ steps.openssl-version.outputs.cache-key }}
 
       - name: Build OpenSSL ${{ steps.openssl-version.outputs.version }}
         if: steps.cache-openssl.outputs.cache-hit != 'true'
@@ -42,6 +42,23 @@ jobs:
           ./Configure --prefix="$HOME/openssl-3" --openssldir="$HOME/openssl-3" --libdir=lib shared no-docs
           make -j$(nproc)
           make install_sw
+
+  test:
+    needs: build-openssl
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore OpenSSL build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/openssl-3
+          key: ${{ needs.build-openssl.outputs.cache-key }}
+          fail-on-cache-miss: true
 
       - name: Register OpenSSL with ldconfig and set KAEDE_LIBSSL
         run: |
