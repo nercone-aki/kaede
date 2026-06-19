@@ -44,7 +44,10 @@ jobs:
           sudo make install_sw
 
       - name: Set KAEDE_LIBSSL
-        run: echo "KAEDE_LIBSSL=/usr/local/openssl-3/lib64/libssl.so.3" >> $GITHUB_ENV
+        run: |
+          LIBSSL=$(find /usr/local/openssl-3 -name "libssl.so.3" | head -1)
+          echo "Found libssl at: ${LIBSSL}"
+          echo "KAEDE_LIBSSL=${LIBSSL}" >> $GITHUB_ENV
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
