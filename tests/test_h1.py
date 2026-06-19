@@ -671,7 +671,11 @@ class TestResponseParsingEdgeCases:
         assert status == code
 
     def test_response_with_both_te_and_cl_te_wins(self):
-        """RFC 9112 §6.3: when both TE and CL present in response, TE governs body length"""
+        """RFC 9112 §6.3: in responses, TE takes precedence over CL.
+
+        Note the intentional asymmetry: requests carrying both headers are rejected,
+        while responses are parsed using Transfer-Encoding as authoritative.
+        """
         resp = H1.parse_response(
             b"HTTP/1.1 200 OK\r\n"
             b"Transfer-Encoding: chunked\r\n"
