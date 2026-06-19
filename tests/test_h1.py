@@ -629,8 +629,8 @@ class TestTransferEncodingValidation:
 
     def test_transfer_encoding_gzip_then_chunked_accepted(self):
         """RFC 9112 §6.1: multiple TEs are allowed if 'chunked' is last;
-        chunked MUST be decoded; gzip (a content-transfer encoding) is left
-        to application decoding."""
+        chunked MUST be decoded; gzip (a transfer coding here) is left
+        to application-level decoding."""
         import gzip as _gzip
         gzip_payload = _gzip.compress(b"hello")
         hex_size = f"{len(gzip_payload):x}".encode()
