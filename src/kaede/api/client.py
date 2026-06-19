@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import asyncio
 from typing import Literal
 from dataclasses import dataclass, field
@@ -8,7 +9,7 @@ from importlib.metadata import version
 
 from ..tls import TLSContext, TLSClientConfig
 from ..http import H1, Request, Response, Headers
-from ..process import process_response
+from ..http.process import process_response
 from ..websocket import WebSocket, generate_key, check_accept
 from ..handler.tcp import TCPProtocol, WSClientProtocol
 from ..http.h1 import H1Connection, H1Protocol
@@ -33,6 +34,9 @@ class Config:
     max_connections_per_host: int = 10
 
     decompress: bool = True
+
+    proxy: str | None = None
+    proxy_auth: str | None = None
 
 def split_url(url: str) -> tuple[str, str, int, str, str]:
     parsed = urlsplit(url)
@@ -147,6 +151,9 @@ class Handler:
     async def establish(self, scheme: str, host: str, port: int, authority: str):
         key = (scheme, host, port)
 
+        if self.config.proxy:
+            return await self.establish_via_proxy(scheme, host, port, authority)
+
         if scheme == "http":
             return await self.connect_tcp(key, host, port, authority, None)
 
@@ -168,6 +175,56 @@ class Handler:
                 last_error = exc
 
         raise last_error or ConnectionError(f"failed to connect to {host}:{port}")
+
+    async def proxy_connect(self, proxy_host: str, proxy_port: int, host: str, port: int) -> socket.socket:
+        loop = asyncio.get_running_loop()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setblocking(False)
+
+        try:
+            await asyncio.wait_for(loop.sock_connect(sock, (proxy_host, proxy_port)), timeout=self.config.connect_timeout)
+
+            target = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+            lines = [f"CONNECT {target} HTTP/1.1", f"Host: {target}"]
+            if self.config.proxy_auth:
+                lines.append(f"Proxy-Authorization: {self.config.proxy_auth}")
+            request = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+            await loop.sock_sendall(sock, request)
+
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                chunk = await asyncio.wait_for(loop.sock_recv(sock, 4096), timeout=self.config.read_timeout)
+                if not chunk:
+                    raise ConnectionError("proxy closed connection during CONNECT")
+                buf += chunk
+                if len(buf) > 65536:
+                    raise ConnectionError("proxy CONNECT response too large")
+
+            status_line = buf.split(b"\r\n", 1)[0].split(b" ", 2)
+            if len(status_line) < 2 or status_line[1] != b"200":
+                raise ConnectionError(f"proxy CONNECT failed: {buf.split(chr(13).encode(), 1)[0]!r}")
+
+            return sock
+        except BaseException:
+            sock.close()
+            raise
+
+    async def establish_via_proxy(self, scheme: str, host: str, port: int, authority: str):
+        key = (scheme, host, port)
+        _, proxy_host, proxy_port, _, _ = split_url(self.config.proxy)
+        loop = asyncio.get_running_loop()
+
+        if scheme == "https":
+            sock = await self.proxy_connect(proxy_host, proxy_port, host, port)
+            protocol = TCPProtocol(is_client=True, factory=lambda proto, alpn: self.make_connection(proto, alpn, key, authority), tls_context=self.tls_client_context(), server_name=host, handler=self)
+            await asyncio.wait_for(loop.create_connection(lambda: protocol, sock=sock), timeout=self.config.connect_timeout)
+            await protocol.ready
+            return protocol.connection
+
+        protocol = H1Protocol(self, is_client=True, key=key, authority=authority)
+        await asyncio.wait_for(loop.create_connection(lambda: protocol, proxy_host, proxy_port), timeout=self.config.connect_timeout)
+        await protocol.ready
+        return protocol.connection
 
     def make_connection(self, protocol: TCPProtocol, alpn: str | None, key: tuple, authority: str):
         if alpn == "h2":
@@ -219,6 +276,9 @@ class Handler:
     async def request(self, method: str, url: str, headers: dict[str, str] | None, body: bytes | None, streaming: bool) -> Response:
         request, host, port, authority = build_request(method, url, self.config, headers, body)
 
+        if self.config.proxy and request.scheme == "http":
+            request.target = f"http://{authority}{request.target}"
+
         await request.compress()
 
         if request.body is not None and "Content-Encoding" in request.headers:
@@ -246,11 +306,9 @@ class Handler:
             return await self.websocket_h1(host, port, authority, request, subprotocols, None)
 
         non_h3_kinds = [k for k in self.ordered_kinds() if k != "h3"]
-        if not non_h3_kinds:
-            raise ConnectionError("WebSocket over HTTP/3 is not supported; configure http/1.1 or h2 in protocols")
 
         last_error: BaseException | None = None
-        for kind in non_h3_kinds:
+        for _ in non_h3_kinds:
             try:
                 conn = await self.connect_tcp(key, host, port, authority, self.tls_client_context())
                 self.connections.add(conn)

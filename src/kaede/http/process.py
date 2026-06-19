@@ -9,16 +9,18 @@ import email.utils
 
 from typing import TYPE_CHECKING, Awaitable
 
-from .common import split_list
-from .http.date import HTTPDate
-from .http.models import Request, Response, Headers
-from .http.headers import ETag, AcceptEncoding
+from .date import HTTPDate
+from .models import Request, Response, Headers
+from .headers import ETag, AcceptEncoding, ContentType, Link, LinkValue
+from .authority import authority_matches
+from ..common import split_list
 
 if TYPE_CHECKING:
-    from .api import Callback
-    from .api.client import Config as ClientConfig
-    from .api.server import Config as ServerConfig
+    from ..api import Callback
+    from ..api.client import Config as ClientConfig
+    from ..api.server import Config as ServerConfig
 
+IDEMPOTENT_METHODS   = frozenset({"GET", "HEAD", "OPTIONS", "TRACE", "PUT", "DELETE"})
 NOT_MODIFIED_HEADERS = frozenset({"cache-control", "content-location", "date", "etag", "expires", "vary", "last-modified", "server",})
 
 def parse_one_range(spec: str, total: int) -> tuple[int, int] | str:
@@ -175,6 +177,71 @@ def evaluate_preconditions(request: Request, response: Response) -> Response | N
 
     return None
 
+def is_misdirected(request: Request, config: ServerConfig) -> bool:
+    if config.served_authorities is None:
+        return False
+
+    return not authority_matches(request.url.host, config.served_authorities)
+
+def is_too_early(request: Request, config: ServerConfig) -> bool:
+    if not config.reject_early_data:
+        return False
+
+    early = request.early_data or (request.headers.get("Early-Data") or "").strip() == "1"
+    return early and request.method not in IDEMPOTENT_METHODS
+
+def normalize_early_hints(result) -> list[tuple[str, str]]:
+    if not result:
+        return []
+
+    if isinstance(result, Headers):
+        return result.items()
+
+    out: list[tuple[str, str]] = []
+    links: list[LinkValue] = []
+
+    for item in result:
+        if isinstance(item, LinkValue):
+            links.append(item)
+        elif isinstance(item, (tuple, list)) and len(item) == 2:
+            out.append((str(item[0]), str(item[1])))
+
+    if links:
+        out.append(("Link", Link.build(links)))
+
+    return out
+
+async def collect_early_hints(request: Request, callback: Callback) -> list[tuple[str, str]]:
+    try:
+        result = callback.early_hints(request)
+        if inspect.isawaitable(result):
+            result = await result
+    except Exception:
+        traceback.print_exc()
+        return []
+
+    return normalize_early_hints(result)
+
+def status_response(status_code: int, config: ServerConfig) -> Response:
+    response = Response(b"", status_code=status_code, compression=False, minification=False)
+    response.headers.set("Date", email.utils.formatdate(usegmt=True), override=False)
+    response.headers.set("Server", config.server_name, override=False)
+    response.headers.set("Content-Length", "0")
+    return response
+
+def error_response(request: Request, config: ServerConfig) -> Response:
+    response = Response(b"Internal Server Error", status_code=500, compression=False, minification=False)
+
+    response.headers.set("Date", email.utils.formatdate(usegmt=True), override=False)
+    response.headers.set("Server", config.server_name, override=False)
+    response.headers.set("Content-Type", "text/plain; charset=utf-8")
+    response.headers.set("Content-Length", str(len(response.body)))
+
+    if request.method == "HEAD":
+        response.body = None
+
+    return response
+
 def not_modified(response: Response) -> Response:
     filtered = Headers({})
     for key, values in response.headers.headers.items():
@@ -198,20 +265,13 @@ def precondition_failed(response: Response) -> Response:
     response.headers.set("Content-Length", "0")
     return response
 
-def error_response(request: Request, config: ServerConfig) -> Response:
-    response = Response(b"Internal Server Error", status_code=500, compression=False, minification=False)
-
-    response.headers.set("Date", email.utils.formatdate(usegmt=True), override=False)
-    response.headers.set("Server", config.server_name, override=False)
-    response.headers.set("Content-Type", "text/plain; charset=utf-8")
-    response.headers.set("Content-Length", str(len(response.body)))
-
-    if request.method == "HEAD":
-        response.body = None
-
-    return response
-
 async def process_request(request: Request, callback: Callback, config: ServerConfig, response: Response | None = None) -> Response:
+    if response is None and is_misdirected(request, config):
+        return status_response(421, config)
+
+    if response is None and is_too_early(request, config):
+        return status_response(425, config)
+
     content_encoding = (request.headers.get("Content-Encoding") or "").strip()
     if content_encoding and isinstance(request.body, bytes):
         request.compressed = request.body
@@ -365,8 +425,12 @@ async def process_request(request: Request, callback: Callback, config: ServerCo
         else:
             response.headers.set("Content-Length", "0")
 
-        if (response.has_real_body or response.is_streaming) and response.headers.get("Content-Type", "").startswith("text/") and "charset=" not in response.headers.get("Content-Type", ""):
-            response.headers.set("Content-Type", response.headers.get("Content-Type", "") + "; charset=utf-8")
+        if response.has_real_body or response.is_streaming:
+            ct_value = response.headers.get("Content-Type", "")
+            parsed_ct = ContentType.parse(ct_value)
+
+            if parsed_ct is not None and parsed_ct.type == "text" and parsed_ct.charset is None:
+                response.headers.set("Content-Type", ct_value + "; charset=utf-8")
 
     except Exception:
         traceback.print_exc()

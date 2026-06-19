@@ -64,6 +64,7 @@ class StreamDataReceived:
     stream_id: int
     data: bytes
     end_stream: bool
+    early_data: bool = False
 
 @dataclass
 class StreamReset:
@@ -745,7 +746,7 @@ class QUICConnection:
                         self.recv_keys.pop(LEVEL_HANDSHAKE, None)
 
             elif ftype is frames.Stream:
-                self.on_stream_frame(f)
+                self.on_stream_frame(f, level)
 
             elif ftype is frames.ResetStream:
                 self._events.append(StreamReset(f.stream_id, f.error_code))
@@ -830,7 +831,7 @@ class QUICConnection:
             self.send_keys.pop(LEVEL_INITIAL, None)
             self.recv_keys.pop(LEVEL_INITIAL, None)
 
-    def on_stream_frame(self, f: frames.Stream):
+    def on_stream_frame(self, f: frames.Stream, level: int = LEVEL_APPLICATION):
         if f.stream_id not in self.streams:
             peer_initiated = stream_is_client_initiated(f.stream_id) != self.is_client
             if peer_initiated:
@@ -856,13 +857,16 @@ class QUICConnection:
             self.data_received += delta
             stream.recv_highest_offset = new_end
 
+        if level == LEVEL_EARLY:
+            stream.early_data = True
+
         stream.receiver.receive(f.offset, f.data, f.fin)
 
         chunk = stream.receiver.pull()
         finished = stream.receiver.finished
 
         if chunk or finished:
-            self._events.append(StreamDataReceived(f.stream_id, chunk, finished))
+            self._events.append(StreamDataReceived(f.stream_id, chunk, finished, stream.early_data))
 
         self.extend_stream_credit(stream)
         self.extend_connection_credit()

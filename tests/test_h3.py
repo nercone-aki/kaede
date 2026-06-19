@@ -548,6 +548,7 @@ class TestH3GoawayHandling:
                 self.uni_buffers = {}
                 self.peer_control_stream_id = None
                 self.peer_settings_received = False
+                self.peer_settings_event = __import__("asyncio").Event()
                 self.peer_max_field_section_size = None
                 self.peer_enable_connect = False
                 self.peer_goaway_id = None

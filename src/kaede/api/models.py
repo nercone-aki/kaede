@@ -5,7 +5,7 @@ from typing import Literal, Awaitable, TYPE_CHECKING
 from dataclasses import dataclass
 
 if TYPE_CHECKING:
-    from ..http import Request, Response
+    from ..http import Request, Response, Headers, LinkValue
     from ..websocket import WebSocket
 
 @dataclass
@@ -19,6 +19,9 @@ class Callback:
 
     async def on_request(self, request: Request) -> Response | Awaitable[Response]:
         return Response("Hello, World! This is the Response from the default Kaede Callback.".encode(), content_type="text/plain")
+
+    async def early_hints(self, request: Request) -> Headers | list[LinkValue] | tuple[str, str] | list[str] | None:
+        return None
 
     async def on_websocket(self, request: Request, ws: WebSocket):
         await ws.close(1008, "WebSocket not configured")

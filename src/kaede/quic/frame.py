@@ -366,7 +366,7 @@ def pull_frame(buf: Buffer):
         return HandshakeDone()
 
     if frame_type in (FRAME_DATAGRAM_NOLEN, FRAME_DATAGRAM_LEN):
-        if frame_type & 0x01:  # LEN bit present
+        if frame_type & 0x01:
             length = buf.pull_uint_var()
             data = buf.pull_bytes(length)
         else:

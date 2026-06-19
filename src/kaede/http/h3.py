@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 from . import qpack
 from .models import Request, Response, Headers
-from ..process import process_request
+from .process import process_request, collect_early_hints
+from .trailers import build_trailers
 from ..quic import QUICConnection, HandshakeCompleted, StreamDataReceived, ConnectionTerminated
 from ..quic.tls import QuicTLS, QuicTLSServerContext
 from ..quic.packet import Buffer, encode_uint_var, build_version_negotiation, parse_long_header
@@ -160,6 +161,7 @@ class RequestAssembler:
         self.body = bytearray()
         self.too_large = False
         self.headers_done = False
+        self.trailers: list[tuple[bytes, bytes]] | None = None
 
 QPACK_MAXtable_CAPACITY = 4096
 
@@ -186,6 +188,7 @@ class H3Connection:
         # Peer control stream state
         self.peer_control_stream_id: int | None = None
         self.peer_settings_received: bool = False
+        self.peer_settings_event: asyncio.Event = asyncio.Event()
         self.peer_max_field_section_size: int | None = None
         self.peer_enable_connect: bool = False
         self.peer_goaway_id: int | None = None
@@ -197,6 +200,11 @@ class H3Connection:
         self.assemblers: dict[int, RequestAssembler] = {}
         self.last_processed_stream_id: int = -1
         self.websocket_streams: dict[int, asyncio.Queue] = {}
+        self.early_data_streams: set[int] = set()
+
+        # server push state
+        self.peer_max_push_id: int | None = None
+        self.next_push_id: int = 0
 
         # client state
         self.streams: dict[int, StreamState] = {}
@@ -206,6 +214,13 @@ class H3Connection:
         self.mode = "h3"
         self.closed = False
         self.connected: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        # client push state
+        self.local_max_push_id: int = 1 << 16
+        self.push_promises: dict[int, tuple[int, str]] = {}
+        self.pushes_by_parent: dict[int, list[int]] = {}
+        self.push_stream_ids: dict[int, int] = {}
+        self.push_states: dict[int, StreamState] = {}
 
         self.timer: asyncio.TimerHandle | None = None
 
@@ -239,6 +254,77 @@ class H3Connection:
     def send_data(self, stream_id: int, data: bytes, end_stream: bool = False):
         self.quic.send_stream_data(stream_id, H3.encode_frame(FRAME_DATA, data), end_stream=end_stream)
 
+    def send_trailers(self, stream_id: int, trailers: Headers):
+        h3_headers = [(key.lower().encode("latin-1"), value.encode("latin-1")) for key, value in trailers.items()]
+        field_section = qpack.encode_headers(h3_headers)
+        self.quic.send_stream_data(stream_id, H3.encode_frame(FRAME_HEADERS, field_section), end_stream=True)
+
+    def send_informational(self, stream_id: int, status: int, headers: list[tuple[str, str]]):
+        h3_headers: list[tuple[bytes, bytes]] = [(b":status", str(status).encode("ascii"))]
+        for key, value in headers:
+            h3_headers.append((key.lower().encode("latin-1"), value.encode("latin-1")))
+
+        self.send_headers(stream_id, h3_headers, end_stream=False)
+        self.flush()
+
+    def build_push_request(self, request: Request, promise) -> Request:
+        headers = Headers({})
+        headers.set("Host", request.headers.get("Host") or "")
+        for key, value in promise.headers.items():
+            if not key.startswith(":"):
+                headers.append(key, value)
+
+        return Request(client=self.client, scheme=request.scheme, secure=True, protocol="HTTP/3.0", method=promise.method, target=promise.path, headers=headers, body=None, h2=None, h3=request.h3, tls=self.tls)
+
+    def reserve_push(self, parent_stream_id: int, request: Request, promise) -> tuple[int, Request] | None:
+        if self.peer_max_push_id is None or self.next_push_id > self.peer_max_push_id:
+            return None
+
+        push_id = self.next_push_id
+        self.next_push_id += 1
+
+        authority = request.headers.get("Host") or ""
+        req_headers = [
+            (b":method", promise.method.encode("ascii")),
+            (b":scheme", request.scheme.encode("ascii")),
+            (b":authority", authority.encode("latin-1")),
+            (b":path", promise.path.encode("latin-1")),
+        ]
+        for key, value in promise.headers.items():
+            if not key.startswith(":"):
+                req_headers.append((key.lower().encode("latin-1"), value.encode("latin-1")))
+
+        payload = encode_uint_var(push_id) + qpack.encode_headers(req_headers)
+        self.quic.send_stream_data(parent_stream_id, H3.encode_frame(FRAME_PUSH_PROMISE, payload), end_stream=False)
+
+        push_stream_id = self.quic.get_next_available_stream_id(is_bidi=False)
+        self.quic.send_stream_data(push_stream_id, encode_uint_var(STREAM_PUSH) + encode_uint_var(push_id), end_stream=False)
+
+        return push_stream_id, self.build_push_request(request, promise)
+
+    async def serve_push(self, push_stream_id: int, request: Request):
+        try:
+            response = await process_request(request, callback=self.handler.callback, config=self.config)
+        except Exception:
+            return
+
+        if response.is_streaming:
+            await self.stream(push_stream_id, response)
+            return
+
+        headers = H3.build_response_headers(response)
+
+        if response.has_real_body:
+            self.send_headers(push_stream_id, headers, end_stream=False)
+            self.send_data(push_stream_id, response.body, end_stream=True)
+        elif response.body is not None:
+            self.send_headers(push_stream_id, headers, end_stream=False)
+            await self.send_file(push_stream_id, response.body, response.file_range)
+        else:
+            self.send_headers(push_stream_id, headers, end_stream=True)
+
+        self.flush()
+
     def feed(self, events: list) -> list:
         out: list = []
 
@@ -249,6 +335,8 @@ class H3Connection:
             sid = event.stream_id
 
             if stream_is_bidirectional(sid):
+                if event.early_data:
+                    self.early_data_streams.add(sid)
                 self.feed_request_stream(sid, event.data, event.end_stream, out)
 
             else:
@@ -302,8 +390,89 @@ class H3Connection:
                     out.append(HeadersReceived(unblocked_sid, headers, stream_ended=False))
                     self.feed_request_stream(unblocked_sid, b"", False, out)
 
+        elif stream_type == STREAM_PUSH and self.is_client:
+            if sid not in self.push_stream_ids:
+                reader = Buffer(bytes(buf))
+                try:
+                    push_id = reader.pull_uint_var()
+                except Exception:
+                    return
+
+                del buf[:reader.tell()]
+                self.push_stream_ids[sid] = push_id
+                self.push_states.setdefault(push_id, StreamState(asyncio.get_running_loop(), self.max_body_size))
+
+            self.parse_push_stream(sid, self.push_stream_ids[sid], buf, end_stream)
+
+        elif stream_type == STREAM_PUSH:
+            self.quic.close(0x0105, "H3_STREAM_CREATION_ERROR")
+            return
+
         elif len(buf) > 65536:
             del self.uni_buffers[sid]
+
+    def parse_push_stream(self, sid: int, push_id: int, buf: bytearray, end_stream: bool):
+        state = self.push_states.get(push_id)
+
+        while True:
+            reader = Buffer(bytes(buf))
+
+            try:
+                frame_type = reader.pull_uint_var()
+                length = reader.pull_uint_var()
+            except Exception:
+                break
+
+            header_len = reader.tell()
+            if len(buf) - header_len < length:
+                break
+
+            payload = bytes(buf[header_len:header_len + length])
+            del buf[:header_len + length]
+
+            if frame_type == FRAME_HEADERS:
+                try:
+                    headers = self.qpack_decoder.decode_field_section(payload, stream_id=sid)
+                except qpack.QpackBlocked:
+                    return
+                except qpack.QpackError:
+                    self.quic.close(0x0200, "QPACK decompression failed")
+                    return
+
+                if state is None:
+                    continue
+
+                if state.header_future.done():
+                    state.set_trailers(build_trailers([
+                        (n.decode("ascii", "replace") if isinstance(n, (bytes, bytearray)) else n,
+                         v.decode("utf-8", "replace") if isinstance(v, (bytes, bytearray)) else v)
+                        for n, v in headers
+                        if not (n.decode("ascii", "replace") if isinstance(n, (bytes, bytearray)) else n).startswith(":")
+                    ]))
+                else:
+                    status = 0
+                    hdrs = Headers({})
+                    for nameb, valueb in headers:
+                        name = nameb.decode("ascii", "replace") if isinstance(nameb, (bytes, bytearray)) else nameb
+                        value = valueb.decode("utf-8", "replace") if isinstance(valueb, (bytes, bytearray)) else valueb
+
+                        if name == ":status":
+                            try:
+                                status = int(value)
+                            except ValueError:
+                                status = 0
+
+                        elif not name.startswith(":"):
+                            hdrs.append(name, value)
+
+                    state.set_headers(status, hdrs)
+
+            elif frame_type == FRAME_DATA:
+                if state is not None and payload:
+                    state.push(payload)
+
+        if end_stream and state is not None:
+            state.finish()
 
     def parse_control_stream(self, sid: int, buf: bytearray):
         while True:
@@ -341,6 +510,23 @@ class H3Connection:
                     self.quic.close(0x0109, "H3_SETTINGS_ERROR")
                     return
 
+            elif frame_type == FRAME_MAX_PUSH_ID:
+                try:
+                    value = Buffer(payload).pull_uint_var()
+                except Exception:
+                    self.quic.close(0x0109, "H3_SETTINGS_ERROR")
+                    return
+
+                if self.is_client:
+                    self.quic.close(0x0105, "H3_FRAME_UNEXPECTED")
+                    return
+
+                if self.peer_max_push_id is not None and value < self.peer_max_push_id:
+                    self.quic.close(0x0108, "H3_ID_ERROR")
+                    return
+
+                self.peer_max_push_id = value
+
     def apply_peer_settings(self, payload: bytes):
         reader = Buffer(payload)
         seen_ids: set[int] = set()
@@ -368,8 +554,10 @@ class H3Connection:
             elif ident == SETTINGS_ENABLE_CONNECT_PROTOCOL:
                 self.peer_enable_connect = (value == 1)
 
+        self.peer_settings_event.set()
+
         if self.is_client and self.control_stream_id is not None:
-            self.quic.send_stream_data(self.control_stream_id, H3.encode_frame(FRAME_MAX_PUSH_ID, encode_uint_var(0)), end_stream=False)
+            self.quic.send_stream_data(self.control_stream_id, H3.encode_frame(FRAME_MAX_PUSH_ID, encode_uint_var(self.local_max_push_id)), end_stream=False)
 
     def feed_request_stream(self, sid: int, data: bytes, end_stream: bool, out: list):
         buf = self.request_buffers.setdefault(sid, bytearray())
@@ -428,9 +616,36 @@ class H3Connection:
                 if not self.is_client:
                     self.quic.close(0x0105, "H3_FRAME_UNEXPECTED")
                     return
-                else:
-                    self.quic.close(0x010D, "H3_ID_ERROR")
+
+                promise_reader = Buffer(payload)
+                try:
+                    push_id = promise_reader.pull_uint_var()
+                except Exception:
+                    self.quic.close(0x0106, "H3_FRAME_ERROR")
                     return
+
+                if push_id > self.local_max_push_id:
+                    self.quic.close(0x0108, "H3_ID_ERROR")
+                    return
+
+                field_section = payload[promise_reader.tell():]
+                try:
+                    promised_headers = self.qpack_decoder.decode_field_section(field_section, stream_id=sid)
+                except qpack.QpackBlocked:
+                    promised_headers = []
+                except qpack.QpackError:
+                    self.quic.close(0x0200, "QPACK decompression failed")
+                    return
+
+                path = ""
+                for nameb, valueb in promised_headers:
+                    name = nameb.decode("ascii", "replace") if isinstance(nameb, (bytes, bytearray)) else nameb
+                    if name == ":path":
+                        path = valueb.decode("latin-1") if isinstance(valueb, (bytes, bytearray)) else valueb
+                        break
+
+                self.push_promises[push_id] = (sid, path)
+                self.pushes_by_parent.setdefault(sid, []).append(push_id)
 
             elif frame_type in (FRAME_CANCEL_PUSH, FRAME_SETTINGS, FRAME_GOAWAY, FRAME_MAX_PUSH_ID):
                 self.quic.close(0x0105, "H3_FRAME_UNEXPECTED")
@@ -542,6 +757,8 @@ class H3Connection:
             if not asm.headers_done:
                 asm.headers = ev.headers
                 asm.headers_done = True
+            else:
+                asm.trailers = ev.headers
 
         elif isinstance(ev, DataReceived):
             if ev.stream_id in self.websocket_streams:
@@ -652,7 +869,14 @@ class H3Connection:
         else:
             body = None
 
-        return Request(client=self.client, scheme=scheme, secure=True, protocol="HTTP/3.0", method=method, target=target or "/", headers=headers, body=body, h2=None, h3=H3Info(connection_id=self.quic.local_cid, stream_id=stream_id), tls=self.tls)
+        early_data = stream_id in self.early_data_streams
+        self.early_data_streams.discard(stream_id)
+
+        trailers = None
+        if asm.trailers is not None:
+            trailers = build_trailers([(n.decode("ascii", "replace") if isinstance(n, (bytes, bytearray)) else n, v.decode("utf-8", "replace") if isinstance(v, (bytes, bytearray)) else v) for n, v in asm.trailers if not (n.decode("ascii", "replace") if isinstance(n, (bytes, bytearray)) else n).startswith(":")])
+
+        return Request(client=self.client, scheme=scheme, secure=True, early_data=early_data, protocol="HTTP/3.0", method=method, target=target or "/", headers=headers, body=body, trailers=trailers, h2=None, h3=H3Info(connection_id=self.quic.local_cid, stream_id=stream_id), tls=self.tls)
 
     def is_websocket_connect(self, raw_headers) -> bool:
         method = protocol = None
@@ -693,7 +917,10 @@ class H3Connection:
         if not authority or not has_scheme or not has_path or scheme not in ("http", "https"):
             return None
 
-        return Request(client=self.client, scheme=scheme, secure=True, protocol="HTTP/3.0", method="GET", target=target or "/", headers=headers, body=None, h2=None, h3=H3Info(connection_id=self.quic.local_cid, stream_id=stream_id), tls=self.tls)
+        early_data = stream_id in self.early_data_streams
+        self.early_data_streams.discard(stream_id)
+
+        return Request(client=self.client, scheme=scheme, secure=True, early_data=early_data, protocol="HTTP/3.0", method="GET", target=target or "/", headers=headers, body=None, h2=None, h3=H3Info(connection_id=self.quic.local_cid, stream_id=stream_id), tls=self.tls)
 
     async def websocket_respond(self, stream_id: int, request: Request):
         subprotocol, deflate = negotiate_websocket(request, self.handler.callback.websocket_subprotocols)
@@ -763,30 +990,46 @@ class H3Connection:
             return
 
         stream_id = request.h3.stream_id
+
+        hints = await collect_early_hints(request, self.handler.callback)
+        if hints:
+            self.send_informational(stream_id, 103, hints)
+
         response = await process_request(request, callback=self.handler.callback, config=self.config)
+
+        reserved: list[tuple[int, Request]] = []
+        if response.push_promises:
+            for promise in response.push_promises:
+                entry = self.reserve_push(stream_id, request, promise)
+                if entry is not None:
+                    reserved.append(entry)
 
         if response.is_streaming:
             await self.stream(stream_id, response)
-            return
-
-        headers = H3.build_response_headers(response)
-
-        if response.has_real_body:
-            self.send_headers(stream_id, headers, end_stream=False)
-            self.send_data(stream_id, response.body, end_stream=True)
-
-        elif response.body is not None:
-            self.send_headers(stream_id, headers, end_stream=False)
-            await self.send_file(stream_id, response.body, response.file_range)
-
         else:
-            self.send_headers(stream_id, headers, end_stream=True)
+            headers = H3.build_response_headers(response)
 
-        self.flush()
+            if response.has_real_body:
+                self.send_headers(stream_id, headers, end_stream=False)
+                self.send_data(stream_id, response.body, end_stream=True)
+
+            elif response.body is not None:
+                self.send_headers(stream_id, headers, end_stream=False)
+                await self.send_file(stream_id, response.body, response.file_range)
+
+            else:
+                self.send_headers(stream_id, headers, end_stream=True)
+
+            self.flush()
+
+        for push_stream_id, pushed_req in reserved:
+            await self.serve_push(push_stream_id, pushed_req)
 
     async def stream(self, stream_id: int, response: Response):
         self.send_headers(stream_id, H3.build_response_headers(response), end_stream=False)
         self.flush()
+
+        trailers = build_trailers(response.trailers) if response.trailers is not None else None
 
         try:
             async for chunk in response.body:
@@ -794,7 +1037,10 @@ class H3Connection:
                     self.send_data(stream_id, chunk, end_stream=False)
                     self.flush()
         finally:
-            self.send_data(stream_id, b"", end_stream=True)
+            if trailers is not None:
+                self.send_trailers(stream_id, trailers)
+            else:
+                self.send_data(stream_id, b"", end_stream=True)
             self.flush()
 
     async def send_file(self, stream_id: int, path: os.PathLike, file_range: tuple[int, int] | None = None):
@@ -868,6 +1114,10 @@ class H3Connection:
             return
 
         if isinstance(ev, HeadersReceived):
+            if state.header_future.done():
+                state.set_trailers(build_trailers([(nameb.decode("ascii", "replace") if isinstance(nameb, (bytes, bytearray)) else nameb, valueb.decode("utf-8", "replace") if isinstance(valueb, (bytes, bytearray)) else valueb) for nameb, valueb in ev.headers if not (nameb.decode("ascii", "replace") if isinstance(nameb, (bytes, bytearray)) else nameb).startswith(":")]))
+                return
+
             status = 0
             status_seen = False
             headers = Headers({})
@@ -931,12 +1181,42 @@ class H3Connection:
             self.streams.pop(stream_id, None)
 
         try:
-            return await consume_response(state, streaming, "HTTP/3.0", read_timeout, on_done)
+            response = await consume_response(state, streaming, "HTTP/3.0", read_timeout, on_done)
         except BaseException:
             self.streams.pop(stream_id, None)
+            self.pushes_by_parent.pop(stream_id, None)
             raise
 
+        if not streaming:
+            push_ids = self.pushes_by_parent.pop(stream_id, [])
+            if push_ids:
+                response.pushes = []
+                for push_id in push_ids:
+                    pstate = self.push_states.get(push_id)
+                    if pstate is None:
+                        continue
+
+                    _, path = self.push_promises.get(push_id, (stream_id, ""))
+                    try:
+                        presp = await consume_response(pstate, False, "HTTP/3.0", read_timeout, lambda pid=push_id: self.push_states.pop(pid, None))
+                        presp.pushed_path = path
+                        response.pushes.append(presp)
+                    except Exception:
+                        self.push_states.pop(push_id, None)
+
+        return response
+
     async def open_websocket(self, request: Request, *, subprotocols: list[str] | None = None) -> WebSocket:
+        read_timeout = self.config.read_timeout if self.handler else 60
+
+        try:
+            await asyncio.wait_for(self.peer_settings_event.wait(), read_timeout)
+        except asyncio.TimeoutError:
+            raise ConnectionError("timed out waiting for HTTP/3 SETTINGS before WebSocket upgrade")
+
+        if not self.peer_enable_connect:
+            raise ConnectionError("server did not advertise SETTINGS_ENABLE_CONNECT_PROTOCOL=1; cannot use WebSocket over HTTP/3")
+
         stream_id = self.open_request_stream()
         headers = H3.build_websocket_connect_headers(request, self.authority, subprotocols)
 

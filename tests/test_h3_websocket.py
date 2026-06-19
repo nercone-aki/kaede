@@ -5,6 +5,8 @@ SETTINGS_ENABLE_CONNECT_PROTOCOL=1 but rejected extended CONNECT.
 """
 from __future__ import annotations
 
+import pytest
+
 from kaede.api.models import Callback
 
 class EchoWebSocket(Callback):
@@ -55,3 +57,30 @@ class TestWebSocketOverH3:
         ws = await lb.websocket("/chat", subprotocols=["chat"])
         assert ws.subprotocol == "chat"
         assert await lb.drive(ws.receive()) == b"sub=chat"
+
+    async def test_subprotocol_not_selected_when_unsupported(self, h3_loopback):
+        # server offers no subprotocols; the client's offer must not be echoed back.
+        lb = h3_loopback(EchoWebSocket())
+        await lb.handshake()
+        ws = await lb.websocket("/chat", subprotocols=["chat"])
+        assert ws.subprotocol is None
+
+    async def test_graceful_close(self, h3_loopback):
+        lb = h3_loopback(EchoWebSocket())
+        await lb.handshake()
+        ws = await lb.websocket("/chat")
+        await lb.drive(ws.send(b"bye"))
+        assert await lb.drive(ws.receive()) == b"bye"
+        await lb.drive(ws.close(1000))
+        # after a clean close the stream ends and receive yields None
+        assert await lb.drive(ws.receive()) is None
+
+    async def test_rejected_without_connect_protocol_setting(self, h3_loopback):
+        # RFC 9220 §3: the client must not use Extended CONNECT unless the server
+        # advertised SETTINGS_ENABLE_CONNECT_PROTOCOL.
+        lb = h3_loopback(EchoWebSocket())
+        await lb.handshake()
+        lb.client_h3.peer_enable_connect = False
+
+        with pytest.raises(ConnectionError):
+            await lb.websocket("/chat")

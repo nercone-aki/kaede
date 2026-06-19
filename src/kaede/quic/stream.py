@@ -224,3 +224,4 @@ class Stream:
         self.data_blocked_sent_at: int | None = None
         self.recv_highest_offset = 0
         self.max_stream_data_pending = False
+        self.early_data = False

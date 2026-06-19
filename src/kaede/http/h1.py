@@ -10,8 +10,9 @@ from typing import Literal
 
 from .models import Request, Response, Headers
 from .errors import HTTPVersionNotSupportedError, HTTPMethodNotImplementedError
+from .trailers import build_trailers
 from ..tls import TLSInfo
-from ..process import process_request
+from .process import process_request, collect_early_hints
 from ..websocket import WebSocket, WebSocketProtocolError, compute_accept, parse_frames
 from ..constants import Characters
 from ..handler.common import StreamState, consume_response, negotiate_websocket, MAX_RESPONSE_HEADER_SIZE
@@ -99,8 +100,9 @@ class H1:
         if is_chunked and content_length is not None:
             raise ValueError("both Transfer-Encoding and Content-Length present")
 
+        trailer_pairs: list[tuple[str, str]] = []
         if is_chunked:
-            body = H1.decode_chunked(rest, max_body_size=max_body_size)
+            body = H1.decode_chunked(rest, max_body_size=max_body_size, trailers=trailer_pairs)
 
         elif content_length is not None:
             if not (content_length.isascii() and content_length.isdigit()) or (len(content_length) > 1 and content_length[0] == "0"):
@@ -123,7 +125,7 @@ class H1:
         if "\x00" in target or "\r" in target or "\n" in target:
             raise ValueError("invalid character in request target")
 
-        return Request(client=client, scheme=scheme, secure=secure, protocol=version_b.decode(), method=method, target=target, headers=headers, body=body, h2=None, h3=None, tls=tls)
+        return Request(client=client, scheme=scheme, secure=secure, protocol=version_b.decode(), method=method, target=target, headers=headers, body=body, trailers=build_trailers(trailer_pairs), h2=None, h3=None, tls=tls)
 
     @staticmethod
     def build_response(response: Response) -> bytes | tuple[bytes, os.PathLike | None]:
@@ -167,6 +169,15 @@ class H1:
             built += f"{key}: {value}\r\n"
         built += "\r\n"
         return built.encode("latin-1")
+
+    @staticmethod
+    def build_trailer_block(trailers: Headers) -> bytes:
+        out = ""
+        for key, value in trailers.items():
+            if any(c in key for c in "\r\n\x00") or any(c in value for c in "\r\n\x00"):
+                continue
+            out += f"{key}: {value}\r\n"
+        return out.encode("latin-1")
 
     @staticmethod
     def response_has_no_body(status_code: int, method: str) -> bool:
@@ -255,15 +266,15 @@ class H1:
         return Response(body=body, status_code=status, headers=headers, protocol=protocol)
 
     @staticmethod
-    def decode_chunked(data: bytes, max_body_size: int | None = None) -> bytes | None:
-        result = H1.scan_chunked(data, max_body_size=max_body_size)
+    def decode_chunked(data: bytes, max_body_size: int | None = None, trailers: list | None = None) -> bytes | None:
+        result = H1.scan_chunked(data, max_body_size=max_body_size, trailers=trailers)
         if result is None:
             raise ValueError("malformed chunked body: incomplete")
         body, _ = result
         return body
 
     @staticmethod
-    def scan_chunked(data: bytes, max_body_size: int | None = None) -> tuple[bytes | None, int] | None:
+    def scan_chunked(data: bytes, max_body_size: int | None = None, trailers: list | None = None) -> tuple[bytes | None, int] | None:
         body = bytearray()
         i = 0
 
@@ -290,10 +301,16 @@ class H1:
                         return None
 
                     is_empty = (line_end == i)
+                    line = data[i:line_end]
                     i = line_end + 2
 
                     if is_empty:
                         break
+
+                    if trailers is not None and line[:1] not in (b" ", b"\t"):
+                        name_b, sep_b, value_b = line.partition(b":")
+                        if sep_b and name_b and name_b == name_b.rstrip(b" \t") and all(chr(c) in CHARS_TOKEN for c in name_b):
+                            trailers.append((name_b.decode("latin-1"), clean_field_value(value_b)))
 
                 return bytes(body), i
 
@@ -322,6 +339,10 @@ class H1Connection:
         self.websocket: WebSocket | None = None
         self.websocket_buffer: bytearray = bytearray()
         self.websocket_pending: bool = False
+
+        # forward-proxy CONNECT tunnel
+        self.tunnel = None
+        self.tunnel_pending: bool = False
         self.continue_sent: bool = False
         self.reading_paused: bool = False
         self.keep_alive: bool = True
@@ -336,6 +357,7 @@ class H1Connection:
         self.remaining = 0
         self.chunk_remaining = 0
         self.headers: Headers | None = None
+        self.client_trailers: list[tuple[str, str]] = []
         self.reusable = False
 
     @property
@@ -397,6 +419,15 @@ class H1Connection:
             return
 
         self.reset_keepalive()
+
+        if self.tunnel is not None:
+            if not self.tunnel.is_closing():
+                self.tunnel.write(data)
+            return
+
+        if self.tunnel_pending:
+            self.buffer.extend(data)
+            return
 
         if self.websocket is not None:
             self.websocket_buffer.extend(data)
@@ -558,6 +589,11 @@ class H1Connection:
                 self.transport.close()
                 return
 
+            if request.method == "CONNECT" and getattr(self.config, "forward_proxy", False):
+                self.tunnel_pending = True
+                self.request_queue.put_nowait((request, False))
+                return
+
             self.request_queue.put_nowait((request, keep_alive))
 
             if request.is_websocket_upgrade:
@@ -578,6 +614,26 @@ class H1Connection:
             date = email.utils.formatdate(usegmt=True)
             self.transport.write(f"HTTP/1.1 100 Continue\r\nDate: {date}\r\n\r\n".encode("latin-1"))
 
+    def send_informational(self, status: int, headers: list[tuple[str, str]]):
+        if self.transport is None or self.transport.is_closing():
+            return
+
+        try:
+            phrase = HTTPStatus(status).phrase
+        except ValueError:
+            phrase = ""
+
+        out = f"HTTP/1.1 {status} {phrase}\r\n"
+
+        for key, value in headers:
+            if any(c in key for c in "\r\n\x00") or any(c in value for c in "\r\n\x00"):
+                continue
+            out += f"{key}: {value}\r\n"
+
+        out += "\r\n"
+
+        self.transport.write(out.encode("latin-1"))
+
     def send_error(self, status: int, phrase: str):
         if self.transport is not None and not self.transport.is_closing():
             date = email.utils.formatdate(usegmt=True)
@@ -594,8 +650,55 @@ class H1Connection:
             if not ws.closed:
                 await ws.close(1011)
 
+    async def connect_tunnel(self, request: Request):
+        if self.transport is None:
+            return
+
+        host, sep, port_s = request.target.rpartition(":")
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+
+        if not sep or not port_s.isdigit():
+            self.send_error(400, "Bad Request")
+            self.transport.close()
+            return
+
+        allow = getattr(self.config, "forward_proxy_allow", None)
+        if allow is not None and host not in allow:
+            self.send_error(403, "Forbidden")
+            self.transport.close()
+            return
+
+        from .proxy import TunnelProtocol
+
+        loop = asyncio.get_running_loop()
+        client_transport = self.transport
+
+        try:
+            upstream_transport, _ = await asyncio.wait_for(loop.create_connection(lambda: TunnelProtocol(client_transport), host, int(port_s)), timeout=self.config.keepalive_timeout)
+        except Exception:
+            if self.transport is not None and not self.transport.is_closing():
+                self.send_error(502, "Bad Gateway")
+                self.transport.close()
+            return
+
+        self.tunnel = upstream_transport
+        self.tunnel_pending = False
+        self.keep_alive = False
+
+        date = email.utils.formatdate(usegmt=True)
+        self.transport.write(f"HTTP/1.1 200 Connection Established\r\nDate: {date}\r\n\r\n".encode("latin-1"))
+
+        if self.buffer:
+            upstream_transport.write(bytes(self.buffer))
+            self.buffer.clear()
+
     async def respond(self, request: Request):
         if self.transport is None:
+            return
+
+        if request.method == "CONNECT" and getattr(self.config, "forward_proxy", False):
+            await self.connect_tunnel(request)
             return
 
         if request.is_websocket_upgrade:
@@ -610,6 +713,11 @@ class H1Connection:
 
             await self.websocket_upgrade(request, request.headers.get("Sec-WebSocket-Key", "").strip())
             return
+
+        if request.protocol == "HTTP/1.1":
+            hints = await collect_early_hints(request, self.handler.callback)
+            if hints and self.transport is not None:
+                self.send_informational(103, hints)
 
         response = await process_request(request, callback=self.handler.callback, config=self.config)
 
@@ -663,6 +771,10 @@ class H1Connection:
         if self.transport is None:
             return
 
+        trailers = build_trailers(response.trailers) if response.trailers is not None else None
+        if trailers is not None:
+            response.headers.set("Trailer", ", ".join(name for name in trailers.headers))
+
         self.transport.write(H1.build_response_headers(response))
 
         try:
@@ -672,7 +784,11 @@ class H1Connection:
 
         finally:
             if self.transport is not None:
-                self.transport.write(b"0\r\n\r\n")
+                if trailers is not None:
+                    self.transport.write(b"0\r\n" + H1.build_trailer_block(trailers) + b"\r\n")
+                else:
+                    self.transport.write(b"0\r\n\r\n")
+
                 if not self.keep_alive:
                     self.transport.close()
 
@@ -780,6 +896,10 @@ class H1Connection:
 
         if self.websocket is not None and not self.websocket.closed:
             self.websocket.queue.put_nowait(None)
+
+        if self.tunnel is not None and not self.tunnel.is_closing():
+            self.tunnel.close()
+            self.tunnel = None
 
         self.request_queue.put_nowait(None)
         self.buffer.clear()
@@ -937,12 +1057,20 @@ class H1Connection:
                 return False
 
             is_empty = end == 0
+            line = bytes(self.buffer[:end])
 
             del self.buffer[:end + 2]
 
             if is_empty:
+                if self.client_trailers and self.current is not None:
+                    self.current.set_trailers(build_trailers(self.client_trailers))
                 self.finish_request()
                 return False
+
+            if line[:1] not in (b" ", b"\t"):
+                name_b, sep_b, value_b = line.partition(b":")
+                if sep_b and name_b and name_b == name_b.rstrip(b" \t") and all(chr(c) in CHARS_TOKEN for c in name_b):
+                    self.client_trailers.append((name_b.decode("latin-1"), clean_field_value(value_b)))
 
             return True
 
@@ -956,6 +1084,7 @@ class H1Connection:
         self.reusable = False
         self.current = StreamState(asyncio.get_running_loop(), self.config.max_body_size)
         self.headers = None
+        self.client_trailers: list[tuple[str, str]] = []
         self.state = "head"
 
         if request.body is not None:

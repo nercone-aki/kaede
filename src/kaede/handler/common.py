@@ -40,10 +40,15 @@ class StreamState:
         self.size = 0
         self.failed: BaseException | None = None
         self.ended = False
+        self.trailers: Headers | None = None
 
     def set_headers(self, status: int, headers: Headers):
         if not self.header_future.done():
             self.header_future.set_result((status, headers))
+
+    def set_trailers(self, trailers: Headers | None):
+        if trailers is not None:
+            self.trailers = trailers
 
     def push(self, chunk: bytes):
         if self.failed is not None:
@@ -85,6 +90,12 @@ def dispatch_event(streams: dict[int, StreamState], event: tuple):
         if state is not None:
             state.push(chunk)
 
+    elif kind == "trailers":
+        _, stream_id, trailers = event
+        state = streams.get(stream_id)
+        if state is not None:
+            state.set_trailers(trailers)
+
     elif kind == "end":
         _, stream_id = event
         state = streams.get(stream_id)
@@ -105,6 +116,8 @@ async def consume_response(state: StreamState, streaming: bool, protocol: str, r
     status, headers = await asyncio.wait_for(state.header_future, read_timeout)
 
     if streaming:
+        response = Response(body=None, status_code=status, headers=headers, protocol=protocol)
+
         async def body_iter() -> AsyncIterator[bytes]:
             try:
                 while True:
@@ -112,12 +125,16 @@ async def consume_response(state: StreamState, streaming: bool, protocol: str, r
                     if chunk is None:
                         break
                     yield chunk
+
                 if state.failed is not None:
                     raise state.failed
+
+                response.trailers = state.trailers
             finally:
                 on_done()
 
-        return Response(body=body_iter(), status_code=status, headers=headers, protocol=protocol)
+        response.body = body_iter()
+        return response
 
     body = bytearray()
     while True:
@@ -132,4 +149,4 @@ async def consume_response(state: StreamState, streaming: bool, protocol: str, r
 
     on_done()
 
-    return Response(body=bytes(body), status_code=status, headers=headers, protocol=protocol)
+    return Response(body=bytes(body), status_code=status, headers=headers, protocol=protocol, trailers=state.trailers)

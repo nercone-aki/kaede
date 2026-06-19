@@ -13,9 +13,10 @@ import h2.errors
 import h2.events
 from h2.settings import SettingCodes
 
-from .models import Request, Response, RawRequest, RawResponse, Headers
+from .models import Request, Response, RawRequest, RawResponse, Headers, PushPromise
+from .process import process_request, collect_early_hints
+from .trailers import build_trailers
 from ..tls import TLSInfo
-from ..process import process_request
 from ..websocket import WebSocket, WebSocketProtocolError, parse_frames
 from ..handler.common import StreamState, consume_response, dispatch_event, negotiate_websocket
 from ..handler.tcp import TCPProtocol
@@ -131,11 +132,13 @@ class H2Connection:
 
         self.send_buffers: dict[int, bytearray] = {}
         self.send_ended: dict[int, bool] = {}
+        self.send_trailers_pending: dict[int, list[tuple[str, str]]] = {}
 
         self.flow_control_event = asyncio.Event()
 
         # client response demux
         self.streams: dict[int, StreamState] = {}
+        self.push_states: dict[int, list[tuple[str, int, StreamState]]] = {}
         self.settings: asyncio.Event = asyncio.Event()
         self.peer_enable_connect: bool = False
 
@@ -337,6 +340,11 @@ class H2Connection:
                         if req is not None:
                             completed.append(req)
 
+            elif isinstance(event, h2.events.TrailersReceived):
+                stream = self.request_streams.get(event.stream_id)
+                if stream is not None:
+                    stream.trailers = build_trailers([(n, v) for n, v in event.headers if not n.startswith(":")])
+
             elif isinstance(event, h2.events.StreamEnded):
                 if event.stream_id in self.websocket_streams:
                     self.websocket_streams[event.stream_id].put_nowait(None)
@@ -407,6 +415,19 @@ class H2Connection:
     def discard_send(self, stream_id: int):
         self.send_buffers.pop(stream_id, None)
         self.send_ended.pop(stream_id, None)
+        self.send_trailers_pending.pop(stream_id, None)
+
+    def finish_stream(self, stream_id: int):
+        trailers = self.send_trailers_pending.pop(stream_id, None)
+
+        if trailers:
+            try:
+                self.connection.send_headers(stream_id, trailers, end_stream=True)
+                return
+            except Exception:
+                pass
+
+        self.connection.end_stream(stream_id)
 
     def pump(self, stream_id: int):
         buffer = self.send_buffers.get(stream_id)
@@ -415,7 +436,7 @@ class H2Connection:
         if buffer is None:
             if ended:
                 try:
-                    self.connection.end_stream(stream_id)
+                    self.finish_stream(stream_id)
                 except Exception:
                     pass
                 self.send_ended.pop(stream_id, None)
@@ -434,14 +455,18 @@ class H2Connection:
                 del buffer[:size]
 
                 end = ended and not buffer
-                self.connection.send_data(stream_id, chunk, end_stream=end)
+                has_trailers = stream_id in self.send_trailers_pending
+
+                self.connection.send_data(stream_id, chunk, end_stream=end and not has_trailers)
 
                 if end:
+                    if has_trailers:
+                        self.finish_stream(stream_id)
                     self.discard_send(stream_id)
                     return
 
             if ended:
-                self.connection.end_stream(stream_id)
+                self.finish_stream(stream_id)
                 self.discard_send(stream_id)
 
         except Exception:
@@ -477,7 +502,7 @@ class H2Connection:
                     pass
                 return None
 
-        return Request(client=client, scheme=stream.scheme if stream.scheme in ("http", "https") else "https", secure=secure, protocol="HTTP/2.0", method=stream.method, target=stream.target, headers=stream.headers, body=body, h2=H2Info(connection_id=self.connection_id, stream_id=stream_id), h3=None, tls=tls)
+        return Request(client=client, scheme=stream.scheme if stream.scheme in ("http", "https") else "https", secure=secure, protocol="HTTP/2.0", method=stream.method, target=stream.target, headers=stream.headers, body=body, trailers=stream.trailers, h2=H2Info(connection_id=self.connection_id, stream_id=stream_id), h3=None, tls=tls)
 
     def send_response(self, stream_id: int, response: Response) -> tuple[bytes, os.PathLike | None]:
         headers = H2.build_response_headers(response)
@@ -498,6 +523,14 @@ class H2Connection:
 
     def send_response_headers(self, stream_id: int, response: Response) -> bytes:
         self.connection.send_headers(stream_id, H2.build_response_headers(response), end_stream=False)
+        return self.connection.data_to_send()
+
+    def send_informational(self, stream_id: int, status: int, headers: list[tuple[str, str]]) -> bytes:
+        h2_headers = [(":status", str(status))]
+        for key, value in headers:
+            h2_headers.append((key.lower(), value))
+
+        self.connection.send_headers(stream_id, h2_headers, end_stream=False)
         return self.connection.data_to_send()
 
     def send_chunk(self, stream_id: int, chunk: bytes, end_stream: bool) -> bytes:
@@ -615,6 +648,12 @@ class H2Connection:
                     if event.stream_ended:
                         out_events.append(("end", event.stream_id))
 
+            elif isinstance(event, h2.events.TrailersReceived):
+                if event.stream_id not in self.websocket_streams:
+                    trailers = build_trailers([(n, v) for n, v in event.headers if not n.startswith(":")])
+                    if trailers is not None:
+                        out_events.append(("trailers", event.stream_id, trailers))
+
             elif isinstance(event, h2.events.StreamEnded):
                 if event.stream_id in self.websocket_streams:
                     self.websocket_streams[event.stream_id].put_nowait(None)
@@ -636,6 +675,14 @@ class H2Connection:
                     if event.changed_settings[SettingCodes.ENABLE_CONNECT_PROTOCOL].new_value == 1:
                         self.peer_enable_connect = True
                 out_events.append(("settings", 0))
+
+            elif isinstance(event, h2.events.PushedStreamReceived):
+                path = ""
+                for name, value in event.headers:
+                    if name == ":path":
+                        path = value
+                        break
+                out_events.append(("push", event.parent_stream_id, event.pushed_stream_id, path))
 
             elif isinstance(event, h2.events.WindowUpdated):
                 if event.stream_id == 0:
@@ -697,6 +744,54 @@ class H2Connection:
             if not ws.closed:
                 await ws.close(1011)
 
+    def build_push_request(self, request: Request, promise: PushPromise) -> Request:
+        headers = Headers({})
+        headers.set("Host", request.headers.get("Host") or "")
+        for key, value in promise.headers.items():
+            if not key.startswith(":"):
+                headers.append(key, value)
+
+        return Request(client=request.client, scheme=request.scheme, secure=request.secure, protocol="HTTP/2.0", method=promise.method, target=promise.path, headers=headers, body=None, h2=request.h2, h3=None, tls=request.tls)
+
+    def reserve_push(self, parent_stream_id: int, request: Request, promise: PushPromise) -> tuple[int, Request] | None:
+        try:
+            if not self.connection.remote_settings.enable_push:
+                return None
+        except Exception:
+            return None
+
+        authority = request.headers.get("Host") or ""
+        push_headers = [(":method", promise.method), (":scheme", request.scheme), (":authority", authority), (":path", promise.path)]
+        for key, value in promise.headers.items():
+            if not key.startswith(":"):
+                push_headers.append((key.lower(), value))
+
+        try:
+            promised_id = self.connection.get_next_available_stream_id()
+            self.connection.push_stream(parent_stream_id, promised_id, push_headers)
+        except Exception:
+            return None
+
+        return promised_id, self.build_push_request(request, promise)
+
+    async def serve_push(self, stream_id: int, request: Request):
+        if self.transport is None:
+            return
+
+        try:
+            response = await process_request(request, callback=self.handler.callback, config=self.config)
+        except Exception:
+            return
+
+        if response.is_streaming:
+            await self.stream(stream_id, response)
+        else:
+            out, alt_body = self.send_response(stream_id, response)
+            if out and self.transport is not None:
+                self.transport.write(out)
+            if alt_body is not None and self.transport is not None:
+                await self.send_file(stream_id, alt_body, response.file_range)
+
     async def respond(self, request: Request):
         if self.transport is None or request.h2 is None:
             return
@@ -704,6 +799,12 @@ class H2Connection:
         self.inflight += 1
         self.cancel_keepalive()
         try:
+            hints = await collect_early_hints(request, self.handler.callback)
+            if hints and self.transport is not None:
+                out = self.send_informational(request.h2.stream_id, 103, hints)
+                if out:
+                    self.transport.write(out)
+
             response = await process_request(request, callback=self.handler.callback, config=self.config)
 
             if "h3" in self.config.protocols and self.config.bind_quic:
@@ -713,17 +814,31 @@ class H2Connection:
                 except (ValueError, IndexError):
                     pass
 
+            reserved: list[tuple[int, Request]] = []
+            if response.push_promises:
+                for promise in response.push_promises:
+                    entry = self.reserve_push(request.h2.stream_id, request, promise)
+                    if entry is not None:
+                        reserved.append(entry)
+
+                if reserved and self.transport is not None:
+                    out = self.connection.data_to_send()
+                    if out:
+                        self.transport.write(out)
+
             if response.is_streaming:
                 await self.stream(request.h2.stream_id, response)
-                return
+            else:
+                out, alt_body = self.send_response(request.h2.stream_id, response)
 
-            out, alt_body = self.send_response(request.h2.stream_id, response)
+                if out:
+                    self.transport.write(out)
 
-            if out:
-                self.transport.write(out)
+                if alt_body is not None:
+                    await self.send_file(request.h2.stream_id, alt_body, response.file_range)
 
-            if alt_body is not None:
-                await self.send_file(request.h2.stream_id, alt_body, response.file_range)
+            for promised_id, pushed_req in reserved:
+                await self.serve_push(promised_id, pushed_req)
 
         finally:
             self.inflight -= 1
@@ -737,6 +852,10 @@ class H2Connection:
         out = self.send_response_headers(stream_id, response)
         if out:
             self.transport.write(out)
+
+        trailers = build_trailers(response.trailers) if response.trailers is not None else None
+        if trailers is not None:
+            self.send_trailers_pending[stream_id] = [(k.lower(), v) for k, v in trailers.items()]
 
         try:
             async for chunk in response.body:
@@ -879,6 +998,14 @@ class H2Connection:
             if event[0] == "settings":
                 self.settings.set()
                 continue
+
+            if event[0] == "push":
+                _, parent_id, pushed_id, path = event
+                state = StreamState(asyncio.get_running_loop(), self.config.max_body_size)
+                self.streams[pushed_id] = state
+                self.push_states.setdefault(parent_id, []).append((path, pushed_id, state))
+                continue
+
             dispatch_event(self.streams, event)
 
         if closed:
@@ -899,10 +1026,25 @@ class H2Connection:
             self.streams.pop(stream_id, None)
 
         try:
-            return await consume_response(state, streaming, "HTTP/2.0", self.config.read_timeout, on_done)
+            response = await consume_response(state, streaming, "HTTP/2.0", self.config.read_timeout, on_done)
         except BaseException:
             self.streams.pop(stream_id, None)
+            self.push_states.pop(stream_id, None)
             raise
+
+        if not streaming:
+            pushed = self.push_states.pop(stream_id, [])
+            if pushed:
+                response.pushes = []
+                for path, pid, pstate in pushed:
+                    try:
+                        presp = await consume_response(pstate, False, "HTTP/2.0", self.config.read_timeout, lambda pid=pid: self.streams.pop(pid, None))
+                        presp.pushed_path = path
+                        response.pushes.append(presp)
+                    except Exception:
+                        self.streams.pop(pid, None)
+
+        return response
 
     async def websocket(self, request: Request, subprotocols: list[str] | None) -> WebSocket:
         if self.transport is None:

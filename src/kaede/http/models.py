@@ -17,8 +17,9 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from collections.abc import AsyncIterator
 
-from .date import HTTPDate
 from .url import URL
+from .date import HTTPDate
+from .headers import ContentType
 from ..tls import TLSInfo
 
 if TYPE_CHECKING:
@@ -42,10 +43,12 @@ class Request:
     headers: Headers = field(default_factory=lambda: Headers({}))
     body: bytes | None = None
     content_type: str | None = None
+    trailers: Headers | None = None
 
     client: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int] = field(default_factory=lambda: (ipaddress.IPv4Address("0.0.0.0"), 0))
     scheme: Literal["http", "https"] = "http"
     secure: bool = False
+    early_data: bool = False
 
     compression: bool = True
     minification: bool = False
@@ -86,7 +89,8 @@ class Request:
         if "Content-Encoding" in self.headers:
             return
 
-        content_type = (self.content_type or self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        parsed = ContentType.parse(self.content_type or self.headers.get("Content-Type") or "")
+        content_type = parsed.essence if parsed else ""
 
         if content_type.startswith(("image/", "video/", "audio/")) and content_type != "image/svg+xml":
             return
@@ -176,11 +180,23 @@ class Request:
                     self.body = zlib.decompress(self.compressed, -zlib.MAX_WBITS)
 
 @dataclass
+class PushPromise:
+    path: str
+    headers: Headers = field(default_factory=lambda: Headers({}))
+    method: Literal["GET", "HEAD"] = "GET"
+
+@dataclass
 class Response:
     body: bytes | AsyncIterator[bytes] | os.PathLike | None = None
     status_code: int = 200
     headers: Headers = field(default_factory=lambda: Headers({}))
     content_type: str | None = None
+    trailers: Headers | None = None
+
+    push_promises: list[PushPromise] | None = None
+
+    pushes: list[Response] | None = None
+    pushed_path: str | None = None
 
     compression: bool = True
     minification: bool = False
@@ -207,7 +223,8 @@ class Response:
         if "Content-Encoding" in self.headers:
             return
 
-        content_type = (self.content_type or self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        parsed = ContentType.parse(self.content_type or self.headers.get("Content-Type") or "")
+        content_type = parsed.essence if parsed else ""
 
         if content_type.startswith(("image/", "video/", "audio/")) and content_type != "image/svg+xml":
             return
@@ -501,7 +518,8 @@ class Response:
         if not (self.minification and self.has_real_body):
             return
 
-        content_type = (self.content_type or self.headers.get("Content-Type") or "").strip().lower()
+        parsed = ContentType.parse(self.content_type or self.headers.get("Content-Type") or "")
+        content_type = parsed.essence if parsed else ""
 
         try:
             if html and content_type.startswith("text/html"):
@@ -527,6 +545,7 @@ class RawRequest:
     authority: str = ""
     headers: Headers = field(default_factory=lambda: Headers({}))
     body: bytearray = field(default_factory=bytearray)
+    trailers: Headers | None = None
 
 @dataclass
 class RawResponse:

@@ -43,6 +43,13 @@ class Config:
     max_concurrent_streams: int = 100
     max_stream_resets: int = 1000
 
+    served_authorities: list[str] | None = None
+
+    reject_early_data: bool = False
+
+    forward_proxy: bool = False
+    forward_proxy_allow: list[str] | None = None
+
     quic_retry: bool = False
 
     workers: int = 1
