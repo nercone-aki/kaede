@@ -131,4 +131,5 @@ async def consume_response(state: StreamState, streaming: bool, protocol: str, r
         raise state.failed
 
     on_done()
-    return Response(body=bytes(body) if body else None, status_code=status, headers=headers, protocol=protocol)
+
+    return Response(body=bytes(body), status_code=status, headers=headers, protocol=protocol)
