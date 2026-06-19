@@ -60,14 +60,14 @@ jobs:
           key: ${{ needs.build-openssl.outputs.cache-key }}
           fail-on-cache-miss: true
 
-      - name: Register OpenSSL with ldconfig and set KAEDE_LIBSSL
+      - name: Register OpenSSL with ldconfig and set KAEDE_OPENSSL
         run: |
           LIBSSL=$(find "$HOME/openssl-3/lib" -name "libssl.so.3" | head -1)
           echo "Found libssl at: ${LIBSSL}"
           test -n "${LIBSSL}" || { echo "libssl.so.3 not found under $HOME/openssl-3/lib"; exit 1; }
           echo "$HOME/openssl-3/lib" | sudo tee /etc/ld.so.conf.d/openssl35.conf
           sudo ldconfig
-          echo "KAEDE_LIBSSL=${LIBSSL}" >> $GITHUB_ENV
+          echo "KAEDE_OPENSSL=${LIBSSL}" >> $GITHUB_ENV
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5

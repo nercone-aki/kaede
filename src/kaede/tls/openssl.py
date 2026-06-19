@@ -65,7 +65,7 @@ class OpenSSL:
         self.crypto: ctypes.CDLL | None = None
         self.path: str | None = None
 
-        for path in OpenSSL.candidate_libssl_paths():
+        for path in OpenSSL.candidate_lib_paths("libssl"):
             try:
                 lib = ctypes.CDLL(path)
             except OSError:
@@ -79,18 +79,17 @@ class OpenSSL:
             break
 
         if self.ssl is None:
-            raise TLSError("could not load an OpenSSL libssl exporting SSL_set_quic_tls_cbs; OpenSSL 3.5+ is required (set KAEDE_LIBSSL to override)")
+            raise TLSError("could not load an OpenSSL libssl exporting SSL_set_quic_tls_cbs; OpenSSL 3.5+ is required (set KAEDE_OPENSSL to override)")
 
-        if self.path:
-            crypto_path = self.path.replace("libssl", "libcrypto")
-
+        for path in OpenSSL.candidate_lib_paths("libcrypto"):
             try:
-                self.crypto = ctypes.CDLL(crypto_path)
+                self.crypto = ctypes.CDLL(path)
+                break
             except OSError:
-                self.crypto = None
+                continue
 
         if self.crypto is None:
-            raise TLSError(f"could not load the matching libcrypto for {self.path!r}; required for BIO/error handling (set KAEDE_LIBSSL to override)")
+            raise TLSError(f"could not load the matching libcrypto for {self.path!r}; required for BIO/error handling (set KAEDE_OPENSSL to override)")
 
         self.configure()
 
@@ -239,40 +238,45 @@ class OpenSSL:
         return "; ".join(messages)
 
     @staticmethod
-    def candidate_libssl_paths() -> list[str]:
+    def candidate_lib_paths(name: str) -> list[str]:
         paths: list[str] = []
 
-        env = os.environ.get("KAEDE_LIBSSL")
+        env = os.environ.get("KAEDE_OPENSSL")
         if env:
-            paths.append(env)
+            if os.path.isdir(env):
+                if sys.platform == "darwin":
+                    paths.extend(sorted(glob.glob(os.path.join(env, f"{name}*.dylib")), reverse=True))
+                else:
+                    paths.extend(sorted(glob.glob(os.path.join(env, f"{name}*.so*")), reverse=True))
+            else:
+                basename = os.path.basename(env)
+                if name in basename:
+                    paths.append(env)
 
         if sys.platform == "darwin":
             patterns = [
-                "/opt/homebrew/opt/openssl@3*/lib/libssl.dylib",
-                "/opt/homebrew/lib/libssl.dylib",
-                "/usr/local/opt/openssl@3*/lib/libssl.dylib",
-                "/usr/local/lib/libssl.dylib",
+                f"/opt/homebrew/opt/openssl@3*/lib/{name}.dylib",
+                f"/opt/homebrew/lib/{name}.dylib",
+                f"/usr/local/opt/openssl@3*/lib/{name}.dylib",
+                f"/usr/local/lib/{name}.dylib"
             ]
-
             for pattern in patterns:
                 paths.extend(sorted(glob.glob(pattern), reverse=True))
-
         else:
             patterns = [
-                "/usr/lib/*/libssl.so.3",
-                "/usr/lib64/libssl.so.3",
-                "/usr/lib/libssl.so.3",
-                "/lib/*/libssl.so.3",
-                "/usr/local/lib/libssl.so.3",
+                f"/usr/lib/*/{name}.so.3",
+                f"/usr/lib64/{name}.so.3",
+                f"/usr/lib/{name}.so.3",
+                f"/lib/*/{name}.so.3",
+                f"/usr/local/lib/{name}.so.3"
             ]
-
             for pattern in patterns:
                 paths.extend(sorted(glob.glob(pattern), reverse=True))
 
-            for name in ("libssl.so.3", "libssl.so"):
-                paths.append(name)
+            paths.append(f"{name}.so.3")
+            paths.append(f"{name}.so")
 
-        found = ctypes.util.find_library("ssl")
+        found = ctypes.util.find_library(name)
         if found:
             paths.append(found)
 
