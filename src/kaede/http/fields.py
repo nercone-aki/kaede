@@ -454,7 +454,8 @@ class FieldValue:
     @staticmethod
     def parse_qvalue(value: str) -> float:
         try:
-            return max(0.0, min(1.0, float(value)))
+            q = float(value)
+            return q if 0.0 <= q <= 1.0 else 0.0
         except (ValueError, TypeError):
             return 0.0
 
@@ -469,7 +470,13 @@ class FieldValue:
             if not head:
                 continue
 
-            q = FieldValue.parse_qvalue(params.pop("q", "1"))
+            q_str = params.pop("q", "1")
+            try:
+                q = float(q_str)
+            except (ValueError, TypeError):
+                continue
+            if not (0.0 <= q <= 1.0):
+                continue
 
             result.append((head, q, params))
 

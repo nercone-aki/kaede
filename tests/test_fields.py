@@ -62,9 +62,17 @@ class TestParseQList:
         result = parse_qlist("gzip, br;q=0.5, *;q=0")
         assert result == [("gzip", 1.0, {}), ("br", 0.5, {}), ("*", 0.0, {})]
 
-    def test_q_clamped(self):
-        assert parse_qlist("a;q=5")[0][1] == 1.0
-        assert parse_qlist("a;q=-1")[0][1] == 0.0
+    def test_q_out_of_range_not_acceptable(self):
+        # RFC 9110 §12.4.2: qvalue grammar restricts values to [0, 1].
+        # A q-value of 5 is syntactically invalid; the element MUST be dropped.
+        result = parse_qlist("a;q=5")
+        assert len(result) == 0
+
+    def test_q_negative_not_acceptable(self):
+        # RFC 9110 §12.4.2: qvalue grammar restricts values to [0, 1].
+        # A negative q-value is syntactically invalid; the element MUST be dropped.
+        result = parse_qlist("a;q=-1")
+        assert len(result) == 0
 
     def test_default_q_is_one(self):
         assert parse_qlist("deflate")[0][1] == 1.0

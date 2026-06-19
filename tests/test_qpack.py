@@ -180,22 +180,33 @@ class TestDecodeHeaders:
             decode_headers(data)
 
     def test_crlf_in_name_filtered(self):
-        """Headers with CR/LF/NUL in names must be filtered out (injection prevention)"""
-        # Build a legitimate header followed by checking filtered output
-        # The filter in decode_headers removes: b"\r", b"\n", b"\x00"
-        injected = [(b"x-evil\r\n", b"value"), (b"x-ok", b"data")]
-        filtered = [
-            (n, v) for n, v in injected
-            if b"\r" not in n and b"\n" not in n and b"\x00" not in n
-            and b"\r" not in v and b"\n" not in v and b"\x00" not in v
-        ]
-        assert (b"x-evil\r\n", b"value") not in filtered
-        assert (b"x-ok", b"data") in filtered
+        """decode_headers must drop headers whose name contains CR or LF."""
+        # Build a QPACK literal field section (literal name, RIC=0) with CRLF in the name.
+        # Representation: first & 0x20 → literal name (RFC 9204 §3.2.8).
+        injected = (
+            bytes([0x00, 0x00])  # required_insert_count=0, delta_base=0
+            + encode_string(b"x-evil\r\ninjected", 3, 0x20)
+            + encode_string(b"value", 7, 0x00)
+        )
+        result = decode_headers(injected)
+        assert not any(b"\r" in n or b"\n" in n for n, _ in result)
+        # A header with a safe name must still pass through.
+        safe = (
+            bytes([0x00, 0x00])
+            + encode_string(b"x-ok", 3, 0x20)
+            + encode_string(b"data", 7, 0x00)
+        )
+        assert any(n == b"x-ok" for n, _ in decode_headers(safe))
 
     def test_null_in_value_filtered(self):
-        injected = [(b"x-hdr", b"val\x00ue")]
-        filtered = [(n, v) for n, v in injected if b"\x00" not in v]
-        assert filtered == []
+        """decode_headers must drop headers whose value contains a NUL byte."""
+        data = (
+            bytes([0x00, 0x00])
+            + encode_string(b"x-hdr", 3, 0x20)
+            + encode_string(b"val\x00ue", 7, 0x00)
+        )
+        result = decode_headers(data)
+        assert not any(b"\x00" in v for _, v in result)
 
 class TestEncodeHeaders:
     def test_produces_bytes(self):

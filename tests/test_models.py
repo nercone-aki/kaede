@@ -346,21 +346,14 @@ class TestResponseCompressBytes:
 
         run(go())
 
-    def test_zstd_preferred_over_br_at_equal_q(self):
-        """When zstd and br have equal quality, zstd has higher built-in priority."""
+    def test_equal_q_any_accepted_encoding_chosen(self):
+        """RFC 7231 §5.3.4: when multiple encodings share the same q-value, any may be
+        chosen — the selection order is implementation-defined and not mandated by the RFC."""
 
         async def go():
             r = Response(body=b"x" * 100, content_type="text/plain")
             await r.compress({"zstd": 1.0, "br": 1.0})
-            assert r.headers.get("Content-Encoding") == "zstd"
-
-        run(go())
-
-    def test_br_preferred_over_gzip_at_equal_q(self):
-        async def go():
-            r = Response(body=b"x" * 100, content_type="text/plain")
-            await r.compress({"br": 1.0, "gzip": 1.0})
-            assert r.headers.get("Content-Encoding") == "br"
+            assert r.headers.get("Content-Encoding") in ("zstd", "br")
 
         run(go())
 

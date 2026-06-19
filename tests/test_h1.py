@@ -628,13 +628,21 @@ class TestTransferEncodingValidation:
             )
 
     def test_transfer_encoding_gzip_then_chunked_accepted(self):
-        """RFC 9112 §6.1: multiple TEs are allowed if 'chunked' is last"""
+        """RFC 9112 §6.1: multiple TEs are allowed if 'chunked' is last;
+        chunked MUST be decoded; gzip (a content-transfer encoding) is left
+        to application decoding."""
+        import gzip as _gzip
+        gzip_payload = _gzip.compress(b"hello")
+        hex_size = f"{len(gzip_payload):x}".encode()
+        chunked_body = hex_size + b"\r\n" + gzip_payload + b"\r\n0\r\n\r\n"
         req = H1.parse_request(
             b"POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"
-            b"5\r\nhello\r\n0\r\n\r\n",
+            + chunked_body,
             client=CLIENT,
         )
-        assert req.body == b"hello"
+        # RFC 9112 §6.1: chunked MUST be decoded; the resulting body is the
+        # gzip-compressed payload (gzip TE decoding is the application's responsibility).
+        assert req.body == gzip_payload
 
 # RFC 9112 §4: Response parsing edge cases
 
