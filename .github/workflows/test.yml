@@ -43,7 +43,40 @@ jobs:
           make -j$(nproc)
           make install_sw
 
-  test:
+  test-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OpenSSL via Homebrew
+        run: brew install openssl@3
+
+      - name: Set KAEDE_OPENSSL
+        run: |
+          LIBDIR="$(brew --prefix openssl@3)/lib"
+          echo "Using OpenSSL lib dir: ${LIBDIR}"
+          test -d "${LIBDIR}" || { echo "lib directory not found: ${LIBDIR}"; exit 1; }
+          echo "KAEDE_OPENSSL=${LIBDIR}" >> $GITHUB_ENV
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run tests
+        run: uv run pytest --tb=short -v
+
+  test-linux:
     needs: build-openssl
     runs-on: ubuntu-latest
     strategy:
@@ -60,14 +93,14 @@ jobs:
           key: ${{ needs.build-openssl.outputs.cache-key }}
           fail-on-cache-miss: true
 
-      - name: Register OpenSSL with ldconfig and set KAEDE_OPENSSL
+      - name: Register OpenSSL and Set KAEDE_OPENSSL
         run: |
-          LIBSSL=$(find "$HOME/openssl-3/lib" -name "libssl.so.3" | head -1)
-          echo "Found libssl at: ${LIBSSL}"
-          test -n "${LIBSSL}" || { echo "libssl.so.3 not found under $HOME/openssl-3/lib"; exit 1; }
-          echo "$HOME/openssl-3/lib" | sudo tee /etc/ld.so.conf.d/openssl35.conf
+          LIBDIR="$HOME/openssl-3/lib"
+          echo "Using OpenSSL lib dir: ${LIBDIR}"
+          test -d "${LIBDIR}" || { echo "lib directory not found: ${LIBDIR}"; exit 1; }
+          echo "${LIBDIR}" | sudo tee /etc/ld.so.conf.d/openssl35.conf
           sudo ldconfig
-          echo "KAEDE_OPENSSL=${LIBSSL}" >> $GITHUB_ENV
+          echo "KAEDE_OPENSSL=${LIBDIR}" >> $GITHUB_ENV
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
