@@ -458,7 +458,7 @@ class TestWebSocketOverH1:
 
         port = await h1_server(EchoWSCallback())
 
-        loop = asyncio.get_running_loop()
+        _ = asyncio.get_running_loop()
 
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
 

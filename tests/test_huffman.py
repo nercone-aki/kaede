@@ -70,7 +70,7 @@ class TestPadding:
         encoded = huffman_encode(b" ")
         assert len(encoded) == 1
         # The last byte must have padding bits set to 1
-        last_byte = encoded[-1]
+        _ = encoded[-1]
         # The space symbol is 6 bits (0x14 = 0b010100), padded with 2 ones → 0b01010011 = 0x53
         # Actually per HUFFMANtable[32] = (0x14, 6), so bits = 0b010100, pad 2 → 0b01010011 = 0x53
         assert encoded == bytes([0x53])
