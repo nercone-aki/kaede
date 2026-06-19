@@ -103,6 +103,7 @@ jobs:
           echo "${LIBDIR}" | sudo tee /etc/ld.so.conf.d/openssl35.conf
           sudo ldconfig
           echo "KAEDE_OPENSSL=${LIBDIR}" >> $GITHUB_ENV
+          echo "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" >> $GITHUB_ENV
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
