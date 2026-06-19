@@ -21,7 +21,7 @@ jobs:
             | jq -r '[.[] | select(.prerelease == false and .draft == false) | select(.tag_name | test("^openssl-3\\.")) | .tag_name] | first | ltrimstr("openssl-")')
           echo "Resolved OpenSSL version: ${VERSION}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "cache-key=openssl-${VERSION}-${{ runner.os }}-v2" >> $GITHUB_OUTPUT
+          echo "cache-key=openssl-${VERSION}-${{ runner.os }}-v3" >> $GITHUB_OUTPUT
 
       - name: Cache OpenSSL build
         id: cache-openssl
