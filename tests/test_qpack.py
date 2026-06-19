@@ -342,7 +342,7 @@ class TestQpackBlocking:
             decoder.decode_field_section(data, stream_id=4)
         except QpackBlocked:
             pass
-        assert 4 in decoder._blocked
+        assert 4 in decoder.blocked
 
     def test_no_blocked_without_stream_id(self):
         """Without a stream_id, a blocked reference MUST raise QpackError (not QpackBlocked)."""
