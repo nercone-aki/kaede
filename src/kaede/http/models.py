@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from collections.abc import AsyncIterator
 
 from .date import HTTPDate
+from .url import URL
 from ..tls import TLSInfo
 
 if TYPE_CHECKING:
@@ -57,6 +58,12 @@ class Request:
     h2: H2Info | None = None
     h3: H3Info | None = None
     tls: TLSInfo | None = None
+
+    url: URL = field(init=False, repr=False)
+
+    def __post_init__(self):
+        authority = self.headers.get("Host") or ""
+        self.url = URL.from_target(self.target, self.scheme, authority)
 
     @property
     def is_websocket_upgrade(self) -> bool:
