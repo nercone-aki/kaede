@@ -247,7 +247,7 @@ class Handler:
 
     def discard(self, conn):
         if isinstance(conn, H1Connection) and conn.is_open() and conn.reusable:
-                self.idle.setdefault(conn.key, []).append(conn)
+            self.idle.setdefault(conn.key, []).append(conn)
 
         if conn in self.connections:
             self.connections.discard(conn)
