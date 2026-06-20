@@ -85,11 +85,11 @@ class H3:
         return encode_uint_var(frame_type) + encode_uint_var(len(payload)) + payload
 
     @staticmethod
-    def encode_settings(qpack_maxtable_capacity: int = 0) -> bytes:
+    def encode_settings(qpack_max_table_capacity: int = 0) -> bytes:
         body = bytearray()
 
         for ident, value in (
-            (SETTINGS_QPACK_MAX_TABLE_CAPACITY, qpack_maxtable_capacity),
+            (SETTINGS_QPACK_MAX_TABLE_CAPACITY, qpack_max_table_capacity),
             (SETTINGS_QPACK_BLOCKED_STREAMS, 0),
             (SETTINGS_ENABLE_CONNECT_PROTOCOL, 1),
             (0x21, 0)

@@ -110,7 +110,7 @@ class TestH3Settings:
                 f"Forbidden HTTP/2 setting identifier 0x{ident:02x} found in H3 SETTINGS"
             )
 
-    def test_qpack_maxtable_capacity_zero(self):
+    def test_qpack_max_table_capacity_zero(self):
         """RFC 9204 §5: SETTINGS_QPACK_MAX_TABLE_CAPACITY=0 means no dynamic table"""
         settings_frame = H3.encode_settings()
         buf = Buffer(settings_frame)
