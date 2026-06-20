@@ -252,6 +252,7 @@ class Handler:
             else:
                 self.discard(conn)
                 conn.close()
+            return
 
         if conn in self.connections:
             self.connections.discard(conn)
