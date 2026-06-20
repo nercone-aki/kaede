@@ -246,13 +246,8 @@ class Handler:
         return await connect_quic(self, host, port, authority, server_name=host, tls_config=self.config.tls, connect_timeout=self.config.connect_timeout)
 
     def discard(self, conn):
-        if isinstance(conn, H1Connection):
-            if conn.is_open() and conn.reusable:
+        if isinstance(conn, H1Connection) and conn.is_open() and conn.reusable:
                 self.idle.setdefault(conn.key, []).append(conn)
-            else:
-                self.discard(conn)
-                conn.close()
-            return
 
         if conn in self.connections:
             self.connections.discard(conn)
@@ -264,6 +259,9 @@ class Handler:
         idle = self.idle.get(getattr(conn, "key", None))
         if idle and conn in idle:
             idle.remove(conn)
+
+        if isinstance(conn, H1Connection):
+            conn.close()
 
     async def request(self, method: str, url: str, headers: dict[str, str] | None, body: bytes | None, streaming: bool) -> Response:
         request, host, port, authority = build_request(method, url, self.config, headers, body)
