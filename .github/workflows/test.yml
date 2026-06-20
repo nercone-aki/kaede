@@ -118,11 +118,3 @@ jobs:
 
       - name: Run tests
         run: uv run pytest --tb=short -v --cov=src --cov-report=xml
-
-      - name: Upload code coverage report
-        if: matrix.python-version == '3.12'
-        uses: actions/upload-code-coverage@v1
-        with:
-          file: coverage.xml
-          language: Python
-          label: code-coverage/pytest
