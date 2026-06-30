@@ -5,16 +5,14 @@ build-backend = "uv_build"
 [project]
 name = "nercone-kaede"
 version = "3.2.1"
-description = "Python Library for Processing HTTP Request/Response"
+description = "Python Library for Processing Generally used Protocols"
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [ { name = "Nercone", email = "nercone@nercone.dev" } ]
 license = { text = "MIT" }
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
-    "h2",
-    "cryptography",
     "uvloop",
-    "async-lru",
+    "pydantic",
     "minify-html",
     "rcssmin",
     "rjsmin",

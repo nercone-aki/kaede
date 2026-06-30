@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import ssl
 from enum import Enum
 from typing import Literal
 from dataclasses import dataclass, field
 
-class Group(Enum):
+class TLSGroup(Enum):
     # Classic
     X25519     = "x25519"
     X448       = "x448"
@@ -35,7 +34,7 @@ class Group(Enum):
     SECP256R1MLKEM768  = "SecP256r1MLKEM768"
     SECP384R1MLKEM1024 = "SecP384r1MLKEM1024"
 
-class Cipher(Enum):
+class TLSCipher(Enum):
     # ADH (Anonymous DH)
     ADH_AES128_GCM_SHA256  = "ADH-AES128-GCM-SHA256"
     ADH_AES128_SHA         = "ADH-AES128-SHA"
@@ -222,47 +221,84 @@ class Cipher(Enum):
     TLS_AES_256_GCM_SHA384       = "TLS_AES_256_GCM_SHA384"
     TLS_CHACHA20_POLY1305_SHA256 = "TLS_CHACHA20_POLY1305_SHA256"
 
-VERSION_MAP: dict[str, Literal["TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3"]] = {
-    "TLSv1":   "TLSv1.0",
-    "TLSv1.1": "TLSv1.1",
-    "TLSv1.2": "TLSv1.2",
-    "TLSv1.3": "TLSv1.3"
+class TLSVersion(Enum):
+    TLSv1_0 = "TLSv1.0"
+    TLSv1_1 = "TLSv1.1"
+    TLSv1_2 = "TLSv1.2"
+    TLSv1_3 = "TLSv1.3"
+
+class TLSVerifyMode(Enum):
+    NONE     = "None"
+    OPTIONAL = "Optional"
+    REQUIRED = "Required"
+
+GROUP_MAP: dict[str, TLSGroup] = {
+    "x25519":               TLSGroup.X25519,
+    "X25519":               TLSGroup.X25519,
+    "x448":                 TLSGroup.X448,
+    "prime256v1":           TLSGroup.prime256v1,
+    "secp256r1":            TLSGroup.prime256v1,
+    "P-256":                TLSGroup.prime256v1,
+    "secp384r1":            TLSGroup.secp384r1,
+    "P-384":                TLSGroup.secp384r1,
+    "secp521r1":            TLSGroup.secp521r1,
+    "P-521":                TLSGroup.secp521r1,
+    "brainpoolP256r1tls13": TLSGroup.brainpoolP256r1tls13,
+    "brainpoolP384r1tls13": TLSGroup.brainpoolP384r1tls13,
+    "brainpoolP512r1tls13": TLSGroup.brainpoolP512r1tls13,
+    "ffdhe2048":            TLSGroup.FFDHE2048,
+    "ffdhe3072":            TLSGroup.FFDHE3072,
+    "ffdhe4096":            TLSGroup.FFDHE4096,
+    "ffdhe6144":            TLSGroup.FFDHE6144,
+    "ffdhe8192":            TLSGroup.FFDHE8192,
+    "MLKEM512":             TLSGroup.MLKEM512,
+    "MLKEM768":             TLSGroup.MLKEM768,
+    "MLKEM1024":            TLSGroup.MLKEM1024,
+    "X25519MLKEM768":       TLSGroup.X25519MLKEM768,
+    "SecP256r1MLKEM768":    TLSGroup.SECP256R1MLKEM768,
+    "SecP384r1MLKEM1024":   TLSGroup.SECP384R1MLKEM1024
 }
 
-GROUP_MAP: dict[str, Group] = {
-    "x25519":               Group.X25519,
-    "X25519":               Group.X25519,
-    "x448":                 Group.X448,
-    "prime256v1":           Group.prime256v1,
-    "secp256r1":            Group.prime256v1,
-    "P-256":                Group.prime256v1,
-    "secp384r1":            Group.secp384r1,
-    "P-384":                Group.secp384r1,
-    "secp521r1":            Group.secp521r1,
-    "P-521":                Group.secp521r1,
-    "brainpoolP256r1tls13": Group.brainpoolP256r1tls13,
-    "brainpoolP384r1tls13": Group.brainpoolP384r1tls13,
-    "brainpoolP512r1tls13": Group.brainpoolP512r1tls13,
-    "ffdhe2048":            Group.FFDHE2048,
-    "ffdhe3072":            Group.FFDHE3072,
-    "ffdhe4096":            Group.FFDHE4096,
-    "ffdhe6144":            Group.FFDHE6144,
-    "ffdhe8192":            Group.FFDHE8192,
-    "MLKEM512":             Group.MLKEM512,
-    "MLKEM768":             Group.MLKEM768,
-    "MLKEM1024":            Group.MLKEM1024,
-    "X25519MLKEM768":       Group.X25519MLKEM768,
-    "SecP256r1MLKEM768":    Group.SECP256R1MLKEM768,
-    "SecP384r1MLKEM1024":   Group.SECP384R1MLKEM1024
-}
-
-CIPHER_MAP: dict[str, Cipher] = {c.value: c for c in Cipher}
+CIPHER_MAP: dict[str, TLSCipher] = {c.value: c for c in TLSCipher}
 
 @dataclass
-class TLSInfo:
-    version: Literal["TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3"] | None
-    group: Group | None
-    cipher: Cipher | None
+class TLSClientConfig:
+    cafile: str | None = None
+    capath: str | None = None
+
+    verify_mode: TLSVerifyMode = TLSVerifyMode.REQUIRED
+    minimum_version: Literal["TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3"] = "TLSv1.2"
+
+    certfile: str | None = None
+    keyfile: str | None = None
+
+    ciphers: list[TLSCipher] = field(default_factory=lambda: [
+        # TLS 1.3
+        TLSCipher.TLS_AES_128_GCM_SHA256,
+        TLSCipher.TLS_AES_256_GCM_SHA384,
+        TLSCipher.TLS_CHACHA20_POLY1305_SHA256,
+        # TLS 1.2 (ECDSA)
+        TLSCipher.ECDHE_ECDSA_AES128_GCM_SHA256,
+        TLSCipher.ECDHE_ECDSA_AES256_GCM_SHA384,
+        TLSCipher.ECDHE_ECDSA_CHACHA20_POLY1305,
+        # TLS 1.2 (RSA)
+        TLSCipher.ECDHE_RSA_AES128_GCM_SHA256,
+        TLSCipher.ECDHE_RSA_AES256_GCM_SHA384,
+        TLSCipher.ECDHE_RSA_CHACHA20_POLY1305
+    ])
+    groups: list[TLSGroup] = field(default_factory=lambda: [
+        # PQC (Hybrid)
+        TLSGroup.X25519MLKEM768,
+        TLSGroup.SECP384R1MLKEM1024,
+        TLSGroup.SECP256R1MLKEM768,
+        # PQC (Pure)
+        TLSGroup.MLKEM1024,
+        TLSGroup.MLKEM768,
+        # Classic
+        TLSGroup.X25519,
+        TLSGroup.prime256v1,
+        TLSGroup.secp384r1
+    ])
 
 @dataclass
 class TLSServerConfig:
@@ -270,73 +306,33 @@ class TLSServerConfig:
     keyfile: str | None = None
     cafile: str | None = None
 
-    verify_mode: ssl.VerifyMode = ssl.CERT_REQUIRED
-    minimum_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_2
+    verify_mode: TLSVerifyMode = TLSVerifyMode.REQUIRED
+    minimum_version: Literal["TLSv1.0", "TLSv1.1", "TLSv1.2", "TLSv1.3"] = "TLSv1.2"
 
-    ciphers: list[Cipher] = field(default_factory=lambda: [
+    ciphers: list[TLSCipher] = field(default_factory=lambda: [
         # TLS 1.3
-        Cipher.TLS_AES_128_GCM_SHA256,
-        Cipher.TLS_AES_256_GCM_SHA384,
-        Cipher.TLS_CHACHA20_POLY1305_SHA256,
+        TLSCipher.TLS_AES_128_GCM_SHA256,
+        TLSCipher.TLS_AES_256_GCM_SHA384,
+        TLSCipher.TLS_CHACHA20_POLY1305_SHA256,
         # TLS 1.2 (ECDSA)
-        Cipher.ECDHE_ECDSA_AES128_GCM_SHA256,
-        Cipher.ECDHE_ECDSA_AES256_GCM_SHA384,
-        Cipher.ECDHE_ECDSA_CHACHA20_POLY1305,
+        TLSCipher.ECDHE_ECDSA_AES128_GCM_SHA256,
+        TLSCipher.ECDHE_ECDSA_AES256_GCM_SHA384,
+        TLSCipher.ECDHE_ECDSA_CHACHA20_POLY1305,
         # TLS 1.2 (RSA)
-        Cipher.ECDHE_RSA_AES128_GCM_SHA256,
-        Cipher.ECDHE_RSA_AES256_GCM_SHA384,
-        Cipher.ECDHE_RSA_CHACHA20_POLY1305
+        TLSCipher.ECDHE_RSA_AES128_GCM_SHA256,
+        TLSCipher.ECDHE_RSA_AES256_GCM_SHA384,
+        TLSCipher.ECDHE_RSA_CHACHA20_POLY1305
     ])
-    groups: list[Group] = field(default_factory=lambda: [
+    groups: list[TLSGroup] = field(default_factory=lambda: [
         # PQC (Hybrid)
-        Group.X25519MLKEM768,
-        Group.SECP384R1MLKEM1024,
-        Group.SECP256R1MLKEM768,
+        TLSGroup.X25519MLKEM768,
+        TLSGroup.SECP384R1MLKEM1024,
+        TLSGroup.SECP256R1MLKEM768,
         # PQC (Pure)
-        Group.MLKEM1024,
-        Group.MLKEM768,
+        TLSGroup.MLKEM1024,
+        TLSGroup.MLKEM768,
         # Classic
-        Group.X25519,
-        Group.prime256v1,
-        Group.secp384r1
-    ])
-
-@dataclass
-class TLSClientConfig:
-    verify: bool = True
-    cafile: str | None = None
-    capath: str | None = None
-
-    check_hostname: bool = True
-    minimum_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_2
-
-    certfile: str | None = None
-    keyfile: str | None = None
-
-    ciphers: list[Cipher] = field(default_factory=lambda: [
-        # TLS 1.3
-        Cipher.TLS_AES_128_GCM_SHA256,
-        Cipher.TLS_AES_256_GCM_SHA384,
-        Cipher.TLS_CHACHA20_POLY1305_SHA256,
-        # TLS 1.2 (ECDSA)
-        Cipher.ECDHE_ECDSA_AES128_GCM_SHA256,
-        Cipher.ECDHE_ECDSA_AES256_GCM_SHA384,
-        Cipher.ECDHE_ECDSA_CHACHA20_POLY1305,
-        # TLS 1.2 (RSA)
-        Cipher.ECDHE_RSA_AES128_GCM_SHA256,
-        Cipher.ECDHE_RSA_AES256_GCM_SHA384,
-        Cipher.ECDHE_RSA_CHACHA20_POLY1305
-    ])
-    groups: list[Group] = field(default_factory=lambda: [
-        # PQC (Hybrid)
-        Group.X25519MLKEM768,
-        Group.SECP384R1MLKEM1024,
-        Group.SECP256R1MLKEM768,
-        # PQC (Pure)
-        Group.MLKEM1024,
-        Group.MLKEM768,
-        # Classic
-        Group.X25519,
-        Group.prime256v1,
-        Group.secp384r1
+        TLSGroup.X25519,
+        TLSGroup.prime256v1,
+        TLSGroup.secp384r1
     ])

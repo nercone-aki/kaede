@@ -1,534 +1,136 @@
-from __future__ import annotations
-
 import os
+import json
 import gzip
 import zlib
-import base64
 import rjsmin
 import rcssmin
-import asyncio
 import ipaddress
 import zstandard
 import brotlicffi
 import minify_html
+from enum import Enum
 from scour import scour
-from typing import TYPE_CHECKING, Literal
-from datetime import datetime
+from typing import Any, Optional, Literal, TypeVar, TypeAlias
+from importlib.metadata import version
 from dataclasses import dataclass, field
 from collections.abc import AsyncIterator
 
-from .url import URL
-from .date import HTTPDate
+from ..url import URL
 from .headers import ContentType
-from ..tls import TLSInfo
 
-if TYPE_CHECKING:
-    from .h2 import H2Info
-    from .h3 import H3Info
+T = TypeVar("T")
+
+HTTPVersion: TypeAlias = Literal["HTTP/1.0", "HTTP/1.1", "HTTP/2.0", "HTTP/3.0"]
+
+class HTTPHeaderCase(Enum):
+    TITLECASE = "Title-Case" # for HTTP/1
+    LOWERCASE = "lower-case" # for HTTP/2/3
+
+class HTTPHeaders:
+    def __init__(self, value: str | bytes | list[tuple[str, list[str]]], case: Optional[HTTPHeaderCase] = None):
+        self.case = case
+        if isinstance(value, (str, bytes)):
+            self.raw = HTTPHeaders.parse(value).raw
+        elif isinstance(value, list):
+            self.raw = value
+
+    def __getitem__(self, key: str) -> Optional[list[str]]:
+        ...
+
+    def __setitem__(self, key: str, value: str | list[str]):
+        ...
+
+    def __contains__(self, item: str):
+        ...
+
+    def items(self) -> list[tuple[str, str]]:
+        ...
+
+    def get(self, key: str, default: Optional[T] = None) -> Optional[str | T]:
+        ...
+
+    def set(self, key: str, value: str | list[str], override: bool = True):
+        ...
+
+    def append(self, key: str, value: str):
+        ...
+
+    def remove(self, key: str):
+        ...
+
+    @classmethod
+    def parse(cls, value: str | bytes) -> "HTTPHeaders":
+        ...
+
+    def build(self) -> str:
+        ...
 
 @dataclass
-class StructuredFieldList:
-    items: list[StructuredFieldItem] = field(default_factory=list)
-    params: dict[str, object] = field(default_factory=dict)
-
-@dataclass
-class StructuredFieldItem:
-    value: object
-    params: dict[str, object] = field(default_factory=dict)
-
-@dataclass
-class Request:
-    method: Literal["GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"]
-    target: str
-    headers: Headers = field(default_factory=lambda: Headers({}))
-    body: bytes | None = None
-    content_type: str | None = None
-    trailers: Headers | None = None
-
+class HTTPMessage:
     client: tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int] = field(default_factory=lambda: (ipaddress.IPv4Address("0.0.0.0"), 0))
+
+    protocol: Literal["HTTP/1.0", "HTTP/1.1", "HTTP/2.0", "HTTP/3.0"] = "HTTP/1.1"
+
+    headers: HTTPHeaders = field(default_factory=lambda: HTTPHeaders({}))
+    trailers: Optional[HTTPHeaders] = None
+
+    body: Optional[bytes | AsyncIterator[bytes] | os.PathLike] = None
+
     scheme: Literal["http", "https"] = "http"
     secure: bool = False
+
     early_data: bool = False
 
     compression: bool = True
     minification: bool = False
 
-    compressed: bytes | AsyncIterator[bytes] | None = None
-    minified: bytes | AsyncIterator[bytes] | None = None
-
-    protocol: Literal["HTTP/1.0", "HTTP/1.1", "HTTP/2.0", "HTTP/3.0"] = "HTTP/1.1"
-
-    h2: H2Info | None = None
-    h3: H3Info | None = None
-    tls: TLSInfo | None = None
-
-    url: URL = field(init=False, repr=False)
-
-    def __post_init__(self):
-        authority = self.headers.get("Host") or ""
-        self.url = URL.from_target(self.target, self.scheme, authority)
+    compressed: Optional[bytes | AsyncIterator[bytes]] = None
+    minified: Optional[bytes | AsyncIterator[bytes]] = None
 
     @property
-    def is_websocket_upgrade(self) -> bool:
-        upgrade           = (self.headers.get("Upgrade") or "").lower().strip()
-        connection        = (self.headers.get("Connection") or "").lower()
-        websocket_key     = (self.headers.get("Sec-WebSocket-Key") or "").strip()
-        websocket_version = (self.headers.get("Sec-WebSocket-Version") or "").strip()
+    def text(self) -> str:
+        return self.body.decode()
 
-        try:
-            key_valid = len(base64.b64decode(websocket_key, validate=True)) == 16
-        except Exception:
-            key_valid = False
-
-        return self.method == "GET" and upgrade == "websocket" and "upgrade" in connection and key_valid and websocket_version == "13"
-
-    async def compress(self, encoding: str = "zstd"):
-        if not (self.body is not None and self.compression):
-            return
-
-        if "Content-Encoding" in self.headers:
-            return
-
-        parsed = ContentType.parse(self.content_type or self.headers.get("Content-Type") or "")
-        content_type = parsed.essence if parsed else ""
-
-        if content_type.startswith(("image/", "video/", "audio/")) and content_type != "image/svg+xml":
-            return
-
-        if content_type in ("application/zip", "application/gzip", "application/x-gzip", "application/zstd", "application/x-zstd", "application/x-bzip2", "application/x-xz", "application/x-7z-compressed", "application/x-rar-compressed", "application/pdf", "application/ogg", "font/woff", "font/woff2"):
-            return
-
-        if encoding == "zstd":
-            self.body = zstandard.ZstdCompressor(level=3).compress(self.body)
-        elif encoding == "br":
-            self.body = brotlicffi.compress(self.body, quality=4)
-        elif encoding == "gzip":
-            self.body = gzip.compress(self.body, compresslevel=6)
-        elif encoding == "deflate":
-            self.body = zlib.compress(self.body, level=6)
-
-        self.headers.set("Content-Encoding", encoding)
-
-    def decompress(self, encoding: str | None = None, max_size: int | None = None):
-        if not self.compression or self.body is not None or self.compressed is None:
-            return
-
-        encoding = encoding.strip().lower() if encoding is not None else self.headers.get("Content-Encoding", "").strip().lower()
-
-        if encoding == "zstd":
-            decompressor = zstandard.ZstdDecompressor()
-
-            if max_size is not None:
-                try:
-                    result = decompressor.decompress(self.compressed, max_output_size=max_size + 1)
-                except Exception as exc:
-                    raise ValueError("zstd decompression failed") from exc
-
-                if len(result) > max_size:
-                    raise ValueError("decompressed body exceeds limit")
-
-                self.body = result
-
-            else:
-                self.body = decompressor.decompressobj().decompress(self.compressed)
-
-        elif encoding == "br":
-            result = brotlicffi.decompress(self.compressed)
-
-            if max_size is not None and len(result) > max_size:
-                raise ValueError("decompressed body exceeds limit")
-
-            self.body = result
-
-        elif encoding in ("gzip", "x-gzip"):
-            if max_size is not None:
-                decompressor = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
-                result = decompressor.decompress(self.compressed, max_size)
-
-                if decompressor.unconsumed_tail:
-                    raise ValueError("decompressed body exceeds limit")
-
-                self.body = result
-
-            else:
-                self.body = gzip.decompress(self.compressed)
-
-        elif encoding == "deflate":
-            if max_size is not None:
-                try:
-                    decompressor = zlib.decompressobj()
-                    result = decompressor.decompress(self.compressed, max_size)
-
-                    if decompressor.unconsumed_tail:
-                        raise ValueError("decompressed body exceeds limit")
-
-                    self.body = result
-
-                except zlib.error:
-                    decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
-                    result = decompressor.decompress(self.compressed, max_size)
-
-                    if decompressor.unconsumed_tail:
-                        raise ValueError("decompressed body exceeds limit")
-
-                    self.body = result
-
-            else:
-                try:
-                    self.body = zlib.decompress(self.compressed)
-                except zlib.error:
-                    self.body = zlib.decompress(self.compressed, -zlib.MAX_WBITS)
-
-@dataclass
-class PushPromise:
-    path: str
-    headers: Headers = field(default_factory=lambda: Headers({}))
-    method: Literal["GET", "HEAD"] = "GET"
-
-@dataclass
-class Response:
-    body: bytes | AsyncIterator[bytes] | os.PathLike | None = None
-    status_code: int = 200
-    headers: Headers = field(default_factory=lambda: Headers({}))
-    content_type: str | None = None
-    trailers: Headers | None = None
-
-    push_promises: list[PushPromise] | None = None
-
-    pushes: list[Response] | None = None
-    pushed_path: str | None = None
-
-    compression: bool = True
-    minification: bool = False
-
-    compressed: bytes | AsyncIterator[bytes] | None = None
-    minified: bytes | AsyncIterator[bytes] | None = None
-
-    protocol: Literal["HTTP/1.0", "HTTP/1.1", "HTTP/2.0", "HTTP/3.0"] = "HTTP/1.1"
-
-    file_range: tuple[int, int] | None = field(default=None)
+    @property
+    def json(self) -> Any:
+        return json.loads(self.text)
 
     @property
     def has_real_body(self) -> bool:
         return self.body is not None and isinstance(self.body, bytes)
 
-    @property
-    def is_streaming(self) -> bool:
-        return hasattr(self.body, "__aiter__")
-
-    async def compress(self, accepted_encodings: dict[str, float], max_compressible_file_size: int = 16 * 1024 * 1024):
-        if not (self.body is not None and self.compression and accepted_encodings):
+    def compress(self, encoding: Optional[str] = None):
+        if not (self.compression and self.body is not None and self.compressed is not None):
             return
 
-        if "Content-Encoding" in self.headers:
-            return
-
-        parsed = ContentType.parse(self.content_type or self.headers.get("Content-Type") or "")
-        content_type = parsed.essence if parsed else ""
-
-        if content_type.startswith(("image/", "video/", "audio/")) and content_type != "image/svg+xml":
-            return
-
-        if content_type in ("application/zip", "application/gzip", "application/x-gzip", "application/zstd", "application/x-zstd", "application/x-bzip2", "application/x-xz", "application/x-7z-compressed", "application/x-rar-compressed", "application/pdf", "application/ogg", "font/woff", "font/woff2"):
-            return
-
-        star_q = accepted_encodings.get("*")
-        scored: list[tuple[float, int, str]] = []
-
-        for encoding, priority in (("zstd", 0), ("br", 1), ("gzip", 2), ("deflate", 3)):
-            q = accepted_encodings.get(encoding) or star_q
-
-            if q is None or q <= 0:
-                continue
-
-            scored.append((-q, priority, encoding))
-
-        scored.sort()
-
-        for _, _, encoding in scored:
-            if self.is_streaming:
-                body = self.body
-
-                if encoding == "zstd":
-                    async def compress_stream_zstd(src=body):
-                        compressor = zstandard.ZstdCompressor(level=3).compressobj()
-
-                        async for chunk in src:
-                            out = compressor.compress(chunk)
-                            if out:
-                                yield out
-
-                        out = compressor.flush(zstandard.COMPRESSOBJ_FLUSH_FINISH)
-                        if out:
-                            yield out
-
-                    self.body = compress_stream_zstd()
-
-                elif encoding == "br":
-                    async def compress_stream_brotli(src=body):
-                        compressor = brotlicffi.Compressor(quality=4)
-
-                        async for chunk in src:
-                            out = compressor.process(chunk)
-
-                            if out:
-                                yield out
-
-                        out = compressor.finish()
-                        if out:
-                            yield out
-
-                    self.body = compress_stream_brotli()
-
-                elif encoding == "gzip":
-                    async def compress_stream_gzip(src=body):
-                        compressor = zlib.compressobj(level=6, wbits=31)
-
-                        async for chunk in src:
-                            out = compressor.compress(chunk)
-
-                            if out:
-                                yield out
-
-                        out = compressor.flush(zlib.Z_FINISH)
-                        if out:
-                            yield out
-
-                    self.body = compress_stream_gzip()
-
-                elif encoding == "deflate":
-                    async def compress_stream_deflate(src=body):
-                        compressor = zlib.compressobj(level=6)
-
-                        async for chunk in src:
-                            out = compressor.compress(chunk)
-                            if out:
-                                yield out
-
-                        out = compressor.flush(zlib.Z_FINISH)
-                        if out:
-                            yield out
-
-                    self.body = compress_stream_deflate()
-
-                else:
-                    continue
-
-                self.headers.set("Content-Encoding", encoding)
-                self.headers.append_vary("Accept-Encoding")
-
-                return
-
-            if self.has_real_body:
-                try:
-                    if encoding == "zstd":
-                        self.body = zstandard.ZstdCompressor(level=3).compress(self.body)
-                    elif encoding == "br":
-                        self.body = brotlicffi.compress(self.body, quality=4)
-                    elif encoding == "gzip":
-                        self.body = gzip.compress(self.body, compresslevel=6)
-                    elif encoding == "deflate":
-                        self.body = zlib.compress(self.body, level=6)
-                    else:
-                        continue
-                except Exception:
-                    continue
-
-                self.headers.set("Content-Encoding", encoding)
-                self.headers.append_vary("Accept-Encoding")
-
-                return
-
-            loop = asyncio.get_running_loop()
-
-            try:
-                path_str = os.fspath(self.body)
-
-                def read_file():
-                    with open(path_str, "rb") as f:
-                        return f.read(max_compressible_file_size + 1)
-
-                data = await loop.run_in_executor(None, read_file)
-                if len(data) > max_compressible_file_size:
-                    return
-
-                if encoding == "zstd":
-                    compressed = zstandard.ZstdCompressor(level=3).compress(data)
-                elif encoding == "br":
-                    compressed = brotlicffi.compress(data, quality=4)
-                elif encoding == "gzip":
-                    compressed = gzip.compress(data, compresslevel=6)
-                elif encoding == "deflate":
-                    compressed = zlib.compress(data, level=6)
-                else:
-                    continue
-
-            except Exception:
-                continue
-
-            self.body = compressed
-            self.headers.set("Content-Encoding", encoding)
-            self.headers.append_vary("Accept-Encoding")
-
-            return
-
-    def decompress(self, encoding: str | None = None, max_size: int | None = None):
-        if not self.compression or self.body is not None or self.compressed is None:
-            return
-
-        encoding = encoding.strip().lower() if encoding is not None else self.headers.get("Content-Encoding", "").strip().lower()
-
-        if hasattr(self.compressed, "__aiter__"):
-            compressed = self.compressed
-
-            if encoding == "zstd":
-                async def decompress_stream_zstd(src=compressed, _max=max_size):
-                    decompressor = zstandard.ZstdDecompressor().decompressobj()
-                    total = 0
-
-                    async for chunk in src:
-                        out = decompressor.decompress(chunk)
-                        if out:
-                            total += len(out)
-                            if _max is not None and total > _max:
-                                raise ValueError("decompressed streaming body exceeds limit")
-                            yield out
-
-                self.body = decompress_stream_zstd()
-
-            elif encoding == "br":
-                async def decompress_stream_brotli(src=compressed, _max=max_size):
-                    decompressor = brotlicffi.Decompressor()
-                    total = 0
-
-                    async for chunk in src:
-                        out = decompressor.process(chunk)
-                        if out:
-                            total += len(out)
-                            if _max is not None and total > _max:
-                                raise ValueError("decompressed streaming body exceeds limit")
-                            yield out
-
-                self.body = decompress_stream_brotli()
-
-            elif encoding in ("gzip", "x-gzip"):
-                async def decompress_stream_gzip(src=compressed, _max=max_size):
-                    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
-                    total = 0
-
-                    async for chunk in src:
-                        out = decompressor.decompress(chunk)
-                        if out:
-                            total += len(out)
-                            if _max is not None and total > _max:
-                                raise ValueError("decompressed streaming body exceeds limit")
-                            yield out
-
-                    out = decompressor.flush()
-                    if out:
-                        yield out
-
-                self.body = decompress_stream_gzip()
-
-            elif encoding == "deflate":
-                async def decompress_stream_deflate(src=compressed, _max=max_size):
-                    decompressor = zlib.decompressobj(zlib.MAX_WBITS)
-                    total = 0
-
-                    async for chunk in src:
-                        out = decompressor.decompress(chunk)
-                        if out:
-                            total += len(out)
-                            if _max is not None and total > _max:
-                                raise ValueError("decompressed streaming body exceeds limit")
-                            yield out
-
-                    out = decompressor.flush()
-                    if out:
-                        yield out
-
-                self.body = decompress_stream_deflate()
-
-        else:
-            if encoding == "zstd":
-                decompressor = zstandard.ZstdDecompressor()
-
-                if max_size is not None:
-                    try:
-                        result = decompressor.decompress(self.compressed, max_output_size=max_size + 1)
-                    except Exception as exc:
-                        raise ValueError("zstd decompression failed") from exc
-
-                    if len(result) > max_size:
-                        raise ValueError("decompressed body exceeds limit")
-
-                    self.body = result
-
-                else:
-                    self.body = decompressor.decompressobj().decompress(self.compressed)
-
-            elif encoding == "br":
-                result = brotlicffi.decompress(self.compressed)
-
-                if max_size is not None and len(result) > max_size:
-                    raise ValueError("decompressed body exceeds limit")
-
-                self.body = result
-
-            elif encoding in ("gzip", "x-gzip"):
-                if max_size is not None:
-                    decompressor = zlib.decompressobj(wbits=16 + zlib.MAX_WBITS)
-                    result = decompressor.decompress(self.compressed, max_size)
-
-                    if decompressor.unconsumed_tail:
-                        raise ValueError("decompressed body exceeds limit")
-
-                    self.body = result
-
-                else:
-                    self.body = gzip.decompress(self.compressed)
-
-            elif encoding == "deflate":
-                if max_size is not None:
-                    try:
-                        decompressor = zlib.decompressobj()
-                        result = decompressor.decompress(self.compressed, max_size)
-
-                        if decompressor.unconsumed_tail:
-                            raise ValueError("decompressed body exceeds limit")
-
-                        self.body = result
-
-                    except zlib.error:
-                        decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
-                        result = decompressor.decompress(self.compressed, max_size)
-
-                        if decompressor.unconsumed_tail:
-                            raise ValueError("decompressed body exceeds limit")
-
-                        self.body = result
-
-                else:
-                    try:
-                        self.body = zlib.decompress(self.compressed)
-                    except zlib.error:
-                        self.body = zlib.decompress(self.compressed, -zlib.MAX_WBITS)
-
-    async def minify(self, *, html: bool = False, css: bool = False, js: bool = False, svg: bool = False, keep_html_comments: bool = False):
+        if encoding == "zstd":
+            self.compressed = zstandard.ZstdCompressor(level=3).compress(self.body)
+        elif encoding == "br":
+            self.compressed = brotlicffi.compress(self.body, quality=4)
+        elif encoding == "gzip":
+            self.compressed = gzip.compress(self.body, compresslevel=6)
+        elif encoding == "deflate":
+            self.compressed = zlib.compress(self.body, level=6)
+
+        self.headers.set("Content-Encoding", encoding)
+
+    def decompress(self, encoding: Optional[str] = None):
+        ...
+
+    def minify(self):
         if not (self.minification and self.has_real_body):
             return
 
-        parsed = ContentType.parse(self.content_type or self.headers.get("Content-Type") or "")
-        content_type = parsed.essence if parsed else ""
+        content_type = ContentType(self.headers.get("Content-Type") or "")
 
         try:
-            if html and content_type.startswith("text/html"):
-                self.body = minify_html.minify(self.body.decode("utf-8", errors="replace"), minify_js=True, minify_css=True, keep_comments=keep_html_comments, keep_html_and_head_opening_tags=True).encode("utf-8")
-            elif css and content_type.startswith("text/css"):
+            if content_type.essence.startswith("text/html"):
+                self.body = minify_html.minify(self.body.decode("utf-8", errors="replace"), minify_js=True, minify_css=True, keep_comments=True, keep_html_and_head_opening_tags=True).encode("utf-8")
+            elif content_type.essence.startswith("text/css"):
                 self.body = rcssmin.cssmin(self.body.decode("utf-8", errors="replace")).encode("utf-8")
-            elif js and content_type.startswith(("text/javascript", "application/javascript")):
+            elif content_type.essence.startswith(("text/javascript", "application/javascript")):
                 self.body = rjsmin.jsmin(self.body.decode("utf-8", errors="replace")).encode("utf-8")
-            elif svg and content_type.startswith("image/svg"):
+            elif content_type.essence.startswith("image/svg"):
                 options = scour.generateDefaultOptions()
                 options.newlines = False
                 options.shorten_ids = True
@@ -538,205 +140,25 @@ class Response:
             pass
 
 @dataclass
-class RawRequest:
-    method: str = ""
-    target: str = ""
-    scheme: str = "https"
-    authority: str = ""
-    headers: Headers = field(default_factory=lambda: Headers({}))
-    body: bytearray = field(default_factory=bytearray)
-    trailers: Headers | None = None
+class HTTPRequest(HTTPMessage):
+    method: Literal["GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"]
+    target: str
 
-@dataclass
-class RawResponse:
-    status_code: int = 0
-    headers: Headers = field(default_factory=lambda: Headers({}))
-    body: bytearray = field(default_factory=bytearray)
-
-COOKIE_CHARS = set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-COOKIE_OCTETS = ({0x21} | set(range(0x23, 0x2C)) | set(range(0x2D, 0x3B)) | set(range(0x3C, 0x5C)) | set(range(0x5D, 0x7F)))
-
-@dataclass
-class Cookie:
-    name: str
-    value: str
-    expires: datetime | float | int | None = None
-    max_age: int | None = None
-    domain: str | None = None
-    path: str | None = None
+    scheme: Literal["http", "https"] = "http"
     secure: bool = False
-    http_only: bool = False
-    same_site: str | None = None
 
-    def serialize(self) -> str:
-        if not self.name or any(ch not in COOKIE_CHARS for ch in self.name):
-            raise ValueError("invalid cookie name")
+    headers: HTTPHeaders = field(default_factory=lambda: HTTPHeaders({"User-Agent": f"Kaede/{version('nercone-kaede')} (+https://github.com/nercone-rear/kaede/)"}))
 
-        if any(ord(ch) not in COOKIE_OCTETS for ch in self.value):
-            raise ValueError("invalid cookie value")
+    url: URL = field(init=False, repr=False)
 
-        parts = [f"{self.name}={self.value}"]
+    def __post_init__(self):
+        authority = self.headers.get("Host") or ""
+        self.url = URL.from_target(self.target, self.scheme, authority)
 
-        if self.expires is not None:
-            parts.append("Expires=" + HTTPDate.build(self.expires))
+@dataclass
+class HTTPResponse(HTTPMessage):
+    status_code: int = 200
 
-        if self.max_age is not None:
-            if int(self.max_age) < 0:
-                raise ValueError("Max-Age must be a non-negative integer")
-            parts.append(f"Max-Age={int(self.max_age)}")
+    headers: HTTPHeaders = field(default_factory=lambda: HTTPHeaders({"Server": "Kaede"}))
 
-        if self.domain:
-            parts.append(f"Domain={self.domain}")
-
-        if self.path:
-            parts.append(f"Path={self.path}")
-
-        if self.secure:
-            parts.append("Secure")
-
-        if self.http_only:
-            parts.append("HttpOnly")
-
-        if self.same_site:
-            if self.same_site not in ("Strict", "Lax", "None"):
-                raise ValueError("SameSite must be Strict, Lax, or None")
-
-            parts.append(f"SameSite={self.same_site}")
-
-        return "; ".join(parts)
-
-class Headers:
-    def __init__(self, headers: dict[str, str]):
-        self.headers: dict[str, list[str]] = {}
-        for k, v in headers.items():
-            self.append(k, v)
-
-    def __getitem__(self, key: str) -> str | list[str] | None:
-        return self.get(key.lower())
-
-    def __setitem__(self, key: str, value: str):
-        self.set(key.lower(), value)
-
-    def __contains__(self, item: str):
-        return item.lower() in self.headers
-
-    def items(self) -> list[tuple[str, str]]:
-        return [(k, v) for k, values in self.headers.items() for v in values]
-
-    def get(self, key: str, default=None) -> str | list[str] | None:
-        values = self.headers.get(key.lower())
-        if not values:
-            return default
-        if key.lower() == "set-cookie":
-            return values
-        return ", ".join(values)
-
-    def set(self, key: str, value: str, override: bool = True):
-        if override or key.lower() not in self.headers:
-            self.headers[key.lower()] = [value]
-
-    def append(self, key: str, value: str):
-        if key.lower() in self.headers:
-            self.headers[key.lower()].append(value)
-        else:
-            self.headers[key.lower()] = [value]
-
-    def remove(self, key: str):
-        self.headers.pop(key.lower(), None)
-
-    def append_vary(self, header: str):
-        vary = [v.strip() for v in self.get("Vary", "").split(",") if v.strip()]
-
-        if "*" in vary:
-            return
-
-        if header == "*":
-            self.set("Vary", "*")
-            return
-
-        if not any(v.lower() == header.lower() for v in vary):
-            vary.append(header)
-
-        self.set("Vary", ", ".join(vary))
-
-    @staticmethod
-    def parse_cookie(value: str) -> list[tuple[str, str]]:
-        pairs: list[tuple[str, str]] = []
-        if not value:
-            return pairs
-
-        for chunk in value.split(";"):
-            chunk = chunk.strip()
-            if not chunk or "=" not in chunk:
-                continue
-
-            name, _, raw = chunk.partition("=")
-            name = name.strip()
-            raw = raw.strip()
-
-            if name:
-                pairs.append((name, raw))
-
-        return pairs
-
-    @staticmethod
-    def parse_set_cookie(value: str) -> Cookie | None:
-        if not value:
-            return None
-
-        head, _, rest = value.partition(";")
-        if "=" not in head:
-            return None
-
-        name, _, cookie_value = head.partition("=")
-        name = name.strip()
-        cookie_value = cookie_value.strip()
-        if not name or any(ch not in COOKIE_CHARS for ch in name):
-            return None
-
-        cookie = Cookie(name=name, value=cookie_value)
-
-        for attribute in rest.split(";"):
-            attribute = attribute.strip()
-            if not attribute:
-                continue
-            attr_name, _, attr_value = attribute.partition("=")
-            attr_name = attr_name.strip().lower()
-            attr_value = attr_value.strip()
-
-            if attr_name == "expires":
-                from .date import HTTPDate
-                cookie.expires = HTTPDate.parse(attr_value)
-
-            elif attr_name == "max-age":
-                if attr_value:
-                    first = attr_value[0]
-                    rest = attr_value[1:]
-                    if (first == "-" or first.isdigit()) and (not rest or rest.isdigit()):
-                        try:
-                            cookie.max_age = int(attr_value)
-                        except ValueError:
-                            pass
-
-            elif attr_name == "domain":
-                if attr_value.startswith("."):
-                    attr_value = attr_value[1:]
-
-                cookie.domain = attr_value.lower() or None
-
-            elif attr_name == "path":
-                cookie.path = attr_value or None
-
-            elif attr_name == "secure":
-                cookie.secure = True
-
-            elif attr_name == "httponly":
-                cookie.http_only = True
-
-            elif attr_name == "samesite":
-                normalized = attr_value.capitalize()
-
-                if normalized in ("Strict", "Lax", "None"):
-                    cookie.same_site = normalized
-
-        return cookie
+    range: Optional[tuple[int, int]] = field(default=None)
